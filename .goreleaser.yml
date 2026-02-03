@@ -34,14 +34,15 @@ signs:
       - "--yes"
       - "--pinentry-mode"
       - "loopback"
-      - "--passphrase"
-      - "{{ .Env.GPG_PASSPHRASE }}"
+      - "--passphrase-fd"
+      - "0"
       - "--local-user"
       - "{{ .Env.GPG_FINGERPRINT }}"
       - "--output"
       - "${signature}"
       - "--detach-sign"
       - "${artifact}"
+    stdin: "{{ .Env.GPG_PASSPHRASE }}"
 
 release:
   draft: true
