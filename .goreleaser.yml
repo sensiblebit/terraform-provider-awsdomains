@@ -13,20 +13,9 @@ builds:
     ldflags:
       - '-s -w -X main.version={{.Version}}'
     goos:
-      - freebsd
-      - windows
       - linux
-      - darwin
     goarch:
       - amd64
-      - '386'
-      - arm
-      - arm64
-    ignore:
-      - goos: darwin
-        goarch: '386'
-      - goos: windows
-        goarch: arm
     binary: '{{ .ProjectName }}_v{{ .Version }}'
 
 archives:
@@ -42,8 +31,11 @@ signs:
   - artifacts: checksum
     args:
       - "--batch"
+      - "--yes"
       - "--pinentry-mode"
       - "loopback"
+      - "--passphrase"
+      - "{{ .Env.GPG_PASSPHRASE }}"
       - "--local-user"
       - "{{ .Env.GPG_FINGERPRINT }}"
       - "--output"
