@@ -254,9 +254,9 @@ Uses `ImportStatePassthroughID` setting both `domain_name` and `id`.
         "route53domains:DeleteDomain",
         "route53domains:CheckDomainAvailability",
         "route53domains:ListPrices",
-        "        "route53:ListHostedZonesByName",
+        "route53:ListHostedZonesByName",
         "route53:ListResourceRecordSets",
-        "route53:DeleteHostedZone""
+        "route53:DeleteHostedZone"
       ],
       "Resource": "*"
     }
@@ -356,7 +356,3 @@ go get -u ./... && go mod tidy
 3. **Data source for listing owned domains**: `awsdomains_domains` (plural)
 4. **Support for domain transfer**: `TransferDomain` API
 5. **DNSSEC support**: `AssociateDelegationSignerToDomain` API
-
-## License
-
-MPL-2.0
