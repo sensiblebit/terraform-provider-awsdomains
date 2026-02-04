@@ -56,6 +56,7 @@ type DomainRegistrationResourceModel struct {
 	TechPrivacy         tftypes.Bool     `tfsdk:"tech_privacy"`
 	Nameservers         []tftypes.String `tfsdk:"nameservers"`
 	AllowDelete         tftypes.Bool     `tfsdk:"allow_delete"`
+	DeleteHostedZone    tftypes.Bool     `tfsdk:"delete_hosted_zone"`
 	Status              tftypes.String   `tfsdk:"status"`
 	ExpirationDate      tftypes.String   `tfsdk:"expiration_date"`
 	CreationDate        tftypes.String   `tfsdk:"creation_date"`
@@ -186,6 +187,12 @@ func (r *DomainRegistrationResource) Schema(ctx context.Context, req resource.Sc
 				Default:     booldefault.StaticBool(false),
 				Description: "DANGER: If true, destroying this resource will attempt to delete the domain registration. Default is false (domain is only removed from state).",
 			},
+			"delete_hosted_zone": schema.BoolAttribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+				Description: "Delete the auto-created Route53 hosted zone after domain registration. Use when pointing to external DNS. Only deletes if zone is public, has registrar comment, and contains only NS/SOA records.",
+			},
 			"status": schema.StringAttribute{
 				Computed:    true,
 				Description: "Current status of the domain.",
@@ -287,6 +294,94 @@ func (r *DomainRegistrationResource) findHostedZoneID(ctx context.Context, domai
 	}
 
 	return "", fmt.Errorf("hosted zone not found for domain %s", domainName)
+}
+
+// deleteRegistrarHostedZone safely deletes the hosted zone only if ALL conditions are met:
+// 1. Zone name matches the domain exactly
+// 2. Zone is public (not private)
+// 3. Zone comment is "HostedZone created by Route53 Registrar"
+// 4. Zone contains only NS and SOA records (no custom records)
+func (r *DomainRegistrationResource) deleteRegistrarHostedZone(ctx context.Context, domainName string) error {
+	input := &route53.ListHostedZonesByNameInput{
+		DNSName:  aws.String(domainName),
+		MaxItems: aws.Int32(1),
+	}
+
+	output, err := r.route53Client.ListHostedZonesByName(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to list hosted zones: %w", err)
+	}
+
+	// Find exact match
+	for _, zone := range output.HostedZones {
+		zoneName := strings.TrimSuffix(aws.ToString(zone.Name), ".")
+		if zoneName != domainName {
+			continue
+		}
+
+		zoneID := aws.ToString(zone.Id)
+
+		// Safety check 1: must be public zone
+		if zone.Config != nil && zone.Config.PrivateZone {
+			tflog.Warn(ctx, "Hosted zone is private, skipping deletion", map[string]interface{}{
+				"domain":  domainName,
+				"zone_id": zoneID,
+			})
+			return fmt.Errorf("hosted zone is private, not deleting")
+		}
+
+		// Safety check 2: must have registrar comment
+		comment := ""
+		if zone.Config != nil && zone.Config.Comment != nil {
+			comment = *zone.Config.Comment
+		}
+		if comment != "HostedZone created by Route53 Registrar" {
+			tflog.Warn(ctx, "Hosted zone not created by Route53 Registrar, skipping deletion", map[string]interface{}{
+				"domain":  domainName,
+				"zone_id": zoneID,
+				"comment": comment,
+			})
+			return fmt.Errorf("hosted zone comment %q does not match expected registrar comment", comment)
+		}
+
+		// Safety check 3: must only have NS and SOA records
+		recordsOutput, err := r.route53Client.ListResourceRecordSets(ctx, &route53.ListResourceRecordSetsInput{
+			HostedZoneId: aws.String(zoneID),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to list records in hosted zone: %w", err)
+		}
+
+		for _, record := range recordsOutput.ResourceRecordSets {
+			recordType := string(record.Type)
+			if recordType != "NS" && recordType != "SOA" {
+				tflog.Warn(ctx, "Hosted zone has custom records, skipping deletion", map[string]interface{}{
+					"domain":      domainName,
+					"zone_id":     zoneID,
+					"record_name": aws.ToString(record.Name),
+					"record_type": recordType,
+				})
+				return fmt.Errorf("hosted zone has custom record %s %s, not deleting", aws.ToString(record.Name), recordType)
+			}
+		}
+
+		// All checks passed - safe to delete
+		tflog.Info(ctx, "Deleting Route53 Registrar hosted zone", map[string]interface{}{
+			"domain":  domainName,
+			"zone_id": zoneID,
+		})
+
+		_, err = r.route53Client.DeleteHostedZone(ctx, &route53.DeleteHostedZoneInput{
+			Id: aws.String(zoneID),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to delete hosted zone: %w", err)
+		}
+
+		return nil
+	}
+
+	return fmt.Errorf("hosted zone not found for domain %s", domainName)
 }
 
 func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -418,16 +513,39 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 		data.Status = tftypes.StringValue(string(domainDetail.StatusList[0]))
 	}
 
-	// Look up the auto-created hosted zone
-	hostedZoneID, err := r.findHostedZoneID(ctx, domainName)
-	if err != nil {
-		tflog.Warn(ctx, "Could not find hosted zone for domain", map[string]interface{}{
-			"domain": domainName,
-			"error":  err.Error(),
-		})
-		data.HostedZoneID = tftypes.StringNull()
+	// Handle the auto-created hosted zone
+	if data.DeleteHostedZone.ValueBool() {
+		// Delete the registrar-created hosted zone
+		err := r.deleteRegistrarHostedZone(ctx, domainName)
+		if err != nil {
+			tflog.Warn(ctx, "Could not delete hosted zone", map[string]interface{}{
+				"domain": domainName,
+				"error":  err.Error(),
+			})
+			// Still try to get the zone ID for state
+			if hostedZoneID, lookupErr := r.findHostedZoneID(ctx, domainName); lookupErr == nil {
+				data.HostedZoneID = tftypes.StringValue(hostedZoneID)
+			} else {
+				data.HostedZoneID = tftypes.StringNull()
+			}
+		} else {
+			tflog.Info(ctx, "Deleted auto-created hosted zone", map[string]interface{}{
+				"domain": domainName,
+			})
+			data.HostedZoneID = tftypes.StringNull()
+		}
 	} else {
-		data.HostedZoneID = tftypes.StringValue(hostedZoneID)
+		// Look up the auto-created hosted zone
+		hostedZoneID, err := r.findHostedZoneID(ctx, domainName)
+		if err != nil {
+			tflog.Warn(ctx, "Could not find hosted zone for domain", map[string]interface{}{
+				"domain": domainName,
+				"error":  err.Error(),
+			})
+			data.HostedZoneID = tftypes.StringNull()
+		} else {
+			data.HostedZoneID = tftypes.StringValue(hostedZoneID)
+		}
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -627,17 +745,6 @@ func (r *DomainRegistrationResource) Delete(ctx context.Context, req resource.De
 		"domain": domainName,
 	})
 
-	// Get hosted zone ID before deleting domain (use state value or look it up)
-	hostedZoneID := ""
-	if !data.HostedZoneID.IsNull() && !data.HostedZoneID.IsUnknown() {
-		hostedZoneID = data.HostedZoneID.ValueString()
-	} else {
-		// Try to look it up
-		if id, err := r.findHostedZoneID(ctx, domainName); err == nil {
-			hostedZoneID = id
-		}
-	}
-
 	// Attempt to delete the domain
 	_, err := r.client.DeleteDomain(ctx, &route53domains.DeleteDomainInput{
 		DomainName: aws.String(domainName),
@@ -655,29 +762,18 @@ func (r *DomainRegistrationResource) Delete(ctx context.Context, req resource.De
 		"domain": domainName,
 	})
 
-	// Attempt to delete the hosted zone
-	if hostedZoneID != "" {
-		tflog.Info(ctx, "Deleting hosted zone", map[string]interface{}{
-			"domain":         domainName,
-			"hosted_zone_id": hostedZoneID,
+	// Attempt to delete the registrar-created hosted zone (safe - only deletes if all safeguards pass)
+	err = r.deleteRegistrarHostedZone(ctx, domainName)
+	if err != nil {
+		tflog.Warn(ctx, "Could not delete hosted zone", map[string]interface{}{
+			"domain": domainName,
+			"error":  err.Error(),
 		})
-
-		_, err := r.route53Client.DeleteHostedZone(ctx, &route53.DeleteHostedZoneInput{
-			Id: aws.String(hostedZoneID),
+		// Don't fail the destroy - domain is already deleted, zone cleanup is best-effort
+	} else {
+		tflog.Info(ctx, "Hosted zone deleted", map[string]interface{}{
+			"domain": domainName,
 		})
-		if err != nil {
-			tflog.Warn(ctx, "Could not delete hosted zone (may have records)", map[string]interface{}{
-				"domain":         domainName,
-				"hosted_zone_id": hostedZoneID,
-				"error":          err.Error(),
-			})
-			// Don't fail the destroy - domain is already deleted, zone cleanup is best-effort
-		} else {
-			tflog.Info(ctx, "Hosted zone deleted", map[string]interface{}{
-				"domain":         domainName,
-				"hosted_zone_id": hostedZoneID,
-			})
-		}
 	}
 }
 

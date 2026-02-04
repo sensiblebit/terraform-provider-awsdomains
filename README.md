@@ -75,6 +75,7 @@ resource "aws_route53_record" "apex" {
 | `tech_privacy` | bool | No | `true` | WHOIS privacy for tech |
 | `nameservers` | list(string) | No | - | Custom nameservers |
 | `allow_delete` | bool | No | `false` | Allow domain deletion on destroy |
+| `delete_hosted_zone` | bool | No | `false` | Delete auto-created hosted zone (for external DNS) |
 | `registration_timeout` | number | No | `900` | Timeout in seconds |
 
 ### Attributes (Read-Only)
@@ -194,7 +195,8 @@ Provider creates two clients via `ProviderData` struct:
 2. Poll `GetOperationDetail` until `SUCCESSFUL` or timeout
 3. `UpdateDomainNameservers` if specified
 4. `GetDomainDetail` to fetch computed fields
-5. `ListHostedZonesByName` to get hosted zone ID
+5. If `delete_hosted_zone = true`: safely delete the registrar-created zone
+6. Otherwise: `ListHostedZonesByName` to get hosted zone ID
 
 ### Read
 1. `GetDomainDetail` API call
@@ -253,6 +255,7 @@ Uses `ImportStatePassthroughID` setting both `domain_name` and `id`.
         "route53domains:CheckDomainAvailability",
         "route53domains:ListPrices",
         "        "route53:ListHostedZonesByName",
+        "route53:ListResourceRecordSets",
         "route53:DeleteHostedZone""
       ],
       "Resource": "*"

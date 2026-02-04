@@ -111,6 +111,26 @@ resource "awsdomains_domain" "example" {
 }
 ```
 
+### Using External DNS (Delete Hosted Zone)
+
+When using external DNS providers (Cloudflare, etc.), delete the auto-created hosted zone:
+
+```terraform
+resource "awsdomains_domain" "example" {
+  domain_name = "example.com"
+  # ... contacts ...
+
+  # Point to Cloudflare nameservers
+  nameservers = [
+    "ns1.cloudflare.com",
+    "ns2.cloudflare.com",
+  ]
+
+  # Delete the unused Route53 hosted zone
+  delete_hosted_zone = true
+}
+```
+
 ## Schema
 
 ### Required
@@ -129,6 +149,7 @@ resource "awsdomains_domain" "example" {
 - `tech_privacy` (Boolean) Enable WHOIS privacy for tech contact. Defaults to `true`.
 - `nameservers` (List of String) Custom nameservers for the domain.
 - `allow_delete` (Boolean) Allow actual domain deletion on `terraform destroy`. Defaults to `false`.
+- `delete_hosted_zone` (Boolean) Delete the auto-created Route53 hosted zone after registration. Use when pointing to external DNS. Only deletes if zone is public, has registrar comment, and contains only NS/SOA records. Defaults to `false`.
 - `registration_timeout` (Number) Timeout in seconds for domain registration. Defaults to `900`.
 
 ### Read-Only

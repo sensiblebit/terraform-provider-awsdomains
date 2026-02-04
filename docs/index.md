@@ -92,6 +92,7 @@ The provider uses the AWS SDK for Go v2 and supports the standard AWS authentica
         "route53domains:CheckDomainAvailability",
         "route53domains:ListPrices",
         "route53:ListHostedZonesByName",
+        "route53:ListResourceRecordSets",
         "route53:DeleteHostedZone"
       ],
       "Resource": "*"
