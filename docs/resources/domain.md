@@ -9,9 +9,11 @@ description: |-
 
 Registers and manages a domain name through AWS Route53 Domains.
 
-~> **Important:** Domain registration incurs costs ($12-35+ depending on TLD). By default, domains are NOT deleted on `terraform destroy` to prevent accidental loss. Set `allow_delete = true` to enable actual deletion.
+~> **Important:** Domain registration incurs costs ($12-35+ depending on TLD). By default, domains are NOT deleted on `terraform destroy` to prevent accidental loss. Set `allow_delete = true` to enable actual deletion (also deletes the hosted zone if empty).
 
 ## Example Usage
+
+### Basic Registration
 
 ```terraform
 resource "awsdomains_domain" "example" {
@@ -61,15 +63,51 @@ resource "awsdomains_domain" "example" {
   admin_privacy      = true
   registrant_privacy = true
   tech_privacy       = true
+}
+```
 
-  # Optional: custom nameservers
+### Using the Hosted Zone
+
+AWS automatically creates a Route53 hosted zone when registering a domain. The `hosted_zone_id` attribute provides direct access:
+
+```terraform
+resource "awsdomains_domain" "example" {
+  domain_name = "example.com"
+  # ... contacts ...
+}
+
+# Create DNS records without needing a data source lookup
+resource "aws_route53_record" "www" {
+  zone_id = awsdomains_domain.example.hosted_zone_id
+  name    = "www.example.com"
+  type    = "A"
+  ttl     = 300
+  records = ["192.0.2.1"]
+}
+
+# Use with ACME/Let's Encrypt
+resource "acme_certificate" "cert" {
+  # ...
+  dns_challenge {
+    provider = "route53"
+    config = {
+      AWS_HOSTED_ZONE_ID = awsdomains_domain.example.hosted_zone_id
+    }
+  }
+}
+```
+
+### With Custom Nameservers
+
+```terraform
+resource "awsdomains_domain" "example" {
+  domain_name = "example.com"
+  # ... contacts ...
+
   nameservers = [
     "ns1.example.com",
     "ns2.example.com",
   ]
-
-  # Safety: set to true to allow domain deletion
-  allow_delete = false
 }
 ```
 
@@ -99,6 +137,7 @@ resource "awsdomains_domain" "example" {
 - `status` (String) Current status of the domain.
 - `creation_date` (String) Domain creation date in RFC3339 format.
 - `expiration_date` (String) Domain expiration date in RFC3339 format.
+- `hosted_zone_id` (String) The Route53 hosted zone ID automatically created for this domain.
 
 <a id="nestedatt--contact"></a>
 ### Contact

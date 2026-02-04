@@ -17,14 +17,14 @@ type DomainPriceDataSource struct {
 }
 
 type DomainPriceDataSourceModel struct {
-	ID                  types.String  `tfsdk:"id"`
-	TLD                 types.String  `tfsdk:"tld"`
-	RegistrationPrice   types.Float64 `tfsdk:"registration_price"`
-	RenewalPrice        types.Float64 `tfsdk:"renewal_price"`
-	TransferPrice       types.Float64 `tfsdk:"transfer_price"`
+	ID                   types.String  `tfsdk:"id"`
+	TLD                  types.String  `tfsdk:"tld"`
+	RegistrationPrice    types.Float64 `tfsdk:"registration_price"`
+	RenewalPrice         types.Float64 `tfsdk:"renewal_price"`
+	TransferPrice        types.Float64 `tfsdk:"transfer_price"`
 	ChangeOwnershipPrice types.Float64 `tfsdk:"change_ownership_price"`
-	RestorationPrice    types.Float64 `tfsdk:"restoration_price"`
-	Currency            types.String  `tfsdk:"currency"`
+	RestorationPrice     types.Float64 `tfsdk:"restoration_price"`
+	Currency             types.String  `tfsdk:"currency"`
 }
 
 func NewDomainPriceDataSource() datasource.DataSource {
@@ -80,16 +80,16 @@ func (d *DomainPriceDataSource) Configure(ctx context.Context, req datasource.Co
 		return
 	}
 
-	client, ok := req.ProviderData.(*route53domains.Client)
+	providerData, ok := req.ProviderData.(*ProviderData)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *route53domains.Client, got: %T", req.ProviderData),
+			fmt.Sprintf("Expected *ProviderData, got: %T", req.ProviderData),
 		)
 		return
 	}
 
-	d.client = client
+	d.client = providerData.DomainsClient
 }
 
 func (d *DomainPriceDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {

@@ -61,16 +61,16 @@ func (d *DomainAvailabilityDataSource) Configure(ctx context.Context, req dataso
 		return
 	}
 
-	client, ok := req.ProviderData.(*route53domains.Client)
+	providerData, ok := req.ProviderData.(*ProviderData)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *route53domains.Client, got: %T", req.ProviderData),
+			fmt.Sprintf("Expected *ProviderData, got: %T", req.ProviderData),
 		)
 		return
 	}
 
-	d.client = client
+	d.client = providerData.DomainsClient
 }
 
 func (d *DomainAvailabilityDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {

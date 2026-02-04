@@ -3,9 +3,11 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/route53"
 	"github.com/aws/aws-sdk-go-v2/service/route53domains"
 	"github.com/aws/aws-sdk-go-v2/service/route53domains/types"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -23,7 +25,8 @@ var _ resource.Resource = &DomainRegistrationResource{}
 var _ resource.ResourceWithImportState = &DomainRegistrationResource{}
 
 type DomainRegistrationResource struct {
-	client *route53domains.Client
+	client        *route53domains.Client
+	route53Client *route53.Client
 }
 
 type ContactModel struct {
@@ -41,22 +44,23 @@ type ContactModel struct {
 }
 
 type DomainRegistrationResourceModel struct {
-	ID                   tftypes.String   `tfsdk:"id"`
-	DomainName           tftypes.String   `tfsdk:"domain_name"`
-	DurationYears        tftypes.Int64    `tfsdk:"duration_years"`
-	AutoRenew            tftypes.Bool     `tfsdk:"auto_renew"`
-	AdminContact         *ContactModel    `tfsdk:"admin_contact"`
-	RegistrantContact    *ContactModel    `tfsdk:"registrant_contact"`
-	TechContact          *ContactModel    `tfsdk:"tech_contact"`
-	AdminPrivacy         tftypes.Bool     `tfsdk:"admin_privacy"`
-	RegistrantPrivacy    tftypes.Bool     `tfsdk:"registrant_privacy"`
-	TechPrivacy          tftypes.Bool     `tfsdk:"tech_privacy"`
-	Nameservers          []tftypes.String `tfsdk:"nameservers"`
-	AllowDelete          tftypes.Bool     `tfsdk:"allow_delete"`
-	Status               tftypes.String   `tfsdk:"status"`
-	ExpirationDate       tftypes.String   `tfsdk:"expiration_date"`
-	CreationDate         tftypes.String   `tfsdk:"creation_date"`
-	RegistrationTimeout  tftypes.Int64    `tfsdk:"registration_timeout"`
+	ID                  tftypes.String   `tfsdk:"id"`
+	DomainName          tftypes.String   `tfsdk:"domain_name"`
+	DurationYears       tftypes.Int64    `tfsdk:"duration_years"`
+	AutoRenew           tftypes.Bool     `tfsdk:"auto_renew"`
+	AdminContact        *ContactModel    `tfsdk:"admin_contact"`
+	RegistrantContact   *ContactModel    `tfsdk:"registrant_contact"`
+	TechContact         *ContactModel    `tfsdk:"tech_contact"`
+	AdminPrivacy        tftypes.Bool     `tfsdk:"admin_privacy"`
+	RegistrantPrivacy   tftypes.Bool     `tfsdk:"registrant_privacy"`
+	TechPrivacy         tftypes.Bool     `tfsdk:"tech_privacy"`
+	Nameservers         []tftypes.String `tfsdk:"nameservers"`
+	AllowDelete         tftypes.Bool     `tfsdk:"allow_delete"`
+	Status              tftypes.String   `tfsdk:"status"`
+	ExpirationDate      tftypes.String   `tfsdk:"expiration_date"`
+	CreationDate        tftypes.String   `tfsdk:"creation_date"`
+	RegistrationTimeout tftypes.Int64    `tfsdk:"registration_timeout"`
+	HostedZoneID        tftypes.String   `tfsdk:"hosted_zone_id"`
 }
 
 func NewDomainRegistrationResource() resource.Resource {
@@ -200,6 +204,13 @@ func (r *DomainRegistrationResource) Schema(ctx context.Context, req resource.Sc
 				Default:     int64default.StaticInt64(900),
 				Description: "Timeout in seconds to wait for domain registration to complete (default: 900 = 15 minutes).",
 			},
+			"hosted_zone_id": schema.StringAttribute{
+				Computed:    true,
+				Description: "The Route53 hosted zone ID automatically created for this domain.",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
 		},
 	}
 }
@@ -209,16 +220,17 @@ func (r *DomainRegistrationResource) Configure(ctx context.Context, req resource
 		return
 	}
 
-	client, ok := req.ProviderData.(*route53domains.Client)
+	providerData, ok := req.ProviderData.(*ProviderData)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *route53domains.Client, got: %T", req.ProviderData),
+			fmt.Sprintf("Expected *ProviderData, got: %T", req.ProviderData),
 		)
 		return
 	}
 
-	r.client = client
+	r.client = providerData.DomainsClient
+	r.route53Client = providerData.Route53Client
 }
 
 func contactModelToAWS(m *ContactModel) *types.ContactDetail {
@@ -251,6 +263,32 @@ func contactModelToAWS(m *ContactModel) *types.ContactDetail {
 	return contact
 }
 
+// findHostedZoneID looks up the Route53 hosted zone ID for a domain
+func (r *DomainRegistrationResource) findHostedZoneID(ctx context.Context, domainName string) (string, error) {
+	input := &route53.ListHostedZonesByNameInput{
+		DNSName:  aws.String(domainName),
+		MaxItems: aws.Int32(1),
+	}
+
+	output, err := r.route53Client.ListHostedZonesByName(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("failed to list hosted zones: %w", err)
+	}
+
+	// Find exact match (AWS returns zones starting with the name)
+	for _, zone := range output.HostedZones {
+		// Zone names have trailing dot, domain names don't
+		zoneName := strings.TrimSuffix(aws.ToString(zone.Name), ".")
+		if zoneName == domainName {
+			// Zone ID format is "/hostedzone/Z1234567890ABC" - extract just the ID
+			zoneID := strings.TrimPrefix(aws.ToString(zone.Id), "/hostedzone/")
+			return zoneID, nil
+		}
+	}
+
+	return "", fmt.Errorf("hosted zone not found for domain %s", domainName)
+}
+
 func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var data DomainRegistrationResourceModel
 
@@ -266,12 +304,12 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 
 	// Build registration request
 	registerInput := &route53domains.RegisterDomainInput{
-		DomainName:        aws.String(domainName),
-		DurationInYears:   aws.Int32(int32(data.DurationYears.ValueInt64())),
-		AutoRenew:         aws.Bool(data.AutoRenew.ValueBool()),
-		AdminContact:      contactModelToAWS(data.AdminContact),
-		RegistrantContact: contactModelToAWS(data.RegistrantContact),
-		TechContact:       contactModelToAWS(data.TechContact),
+		DomainName:                      aws.String(domainName),
+		DurationInYears:                 aws.Int32(int32(data.DurationYears.ValueInt64())),
+		AutoRenew:                       aws.Bool(data.AutoRenew.ValueBool()),
+		AdminContact:                    contactModelToAWS(data.AdminContact),
+		RegistrantContact:               contactModelToAWS(data.RegistrantContact),
+		TechContact:                     contactModelToAWS(data.TechContact),
 		PrivacyProtectAdminContact:      aws.Bool(data.AdminPrivacy.ValueBool()),
 		PrivacyProtectRegistrantContact: aws.Bool(data.RegistrantPrivacy.ValueBool()),
 		PrivacyProtectTechContact:       aws.Bool(data.TechPrivacy.ValueBool()),
@@ -380,6 +418,18 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 		data.Status = tftypes.StringValue(string(domainDetail.StatusList[0]))
 	}
 
+	// Look up the auto-created hosted zone
+	hostedZoneID, err := r.findHostedZoneID(ctx, domainName)
+	if err != nil {
+		tflog.Warn(ctx, "Could not find hosted zone for domain", map[string]interface{}{
+			"domain": domainName,
+			"error":  err.Error(),
+		})
+		data.HostedZoneID = tftypes.StringNull()
+	} else {
+		data.HostedZoneID = tftypes.StringValue(hostedZoneID)
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -424,6 +474,14 @@ func (r *DomainRegistrationResource) Read(ctx context.Context, req resource.Read
 			nameservers = append(nameservers, tftypes.StringValue(aws.ToString(ns.Name)))
 		}
 		data.Nameservers = nameservers
+	}
+
+	// Refresh hosted zone ID
+	hostedZoneID, err := r.findHostedZoneID(ctx, domainName)
+	if err != nil {
+		data.HostedZoneID = tftypes.StringNull()
+	} else {
+		data.HostedZoneID = tftypes.StringValue(hostedZoneID)
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -507,10 +565,10 @@ func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.Up
 
 	// Update privacy settings
 	_, err = r.client.UpdateDomainContactPrivacy(ctx, &route53domains.UpdateDomainContactPrivacyInput{
-		DomainName:      aws.String(domainName),
-		AdminPrivacy:    aws.Bool(data.AdminPrivacy.ValueBool()),
+		DomainName:        aws.String(domainName),
+		AdminPrivacy:      aws.Bool(data.AdminPrivacy.ValueBool()),
 		RegistrantPrivacy: aws.Bool(data.RegistrantPrivacy.ValueBool()),
-		TechPrivacy:     aws.Bool(data.TechPrivacy.ValueBool()),
+		TechPrivacy:       aws.Bool(data.TechPrivacy.ValueBool()),
 	})
 	if err != nil {
 		resp.Diagnostics.AddError(
@@ -569,6 +627,17 @@ func (r *DomainRegistrationResource) Delete(ctx context.Context, req resource.De
 		"domain": domainName,
 	})
 
+	// Get hosted zone ID before deleting domain (use state value or look it up)
+	hostedZoneID := ""
+	if !data.HostedZoneID.IsNull() && !data.HostedZoneID.IsUnknown() {
+		hostedZoneID = data.HostedZoneID.ValueString()
+	} else {
+		// Try to look it up
+		if id, err := r.findHostedZoneID(ctx, domainName); err == nil {
+			hostedZoneID = id
+		}
+	}
+
 	// Attempt to delete the domain
 	_, err := r.client.DeleteDomain(ctx, &route53domains.DeleteDomainInput{
 		DomainName: aws.String(domainName),
@@ -585,6 +654,31 @@ func (r *DomainRegistrationResource) Delete(ctx context.Context, req resource.De
 	tflog.Info(ctx, "Domain deletion initiated", map[string]interface{}{
 		"domain": domainName,
 	})
+
+	// Attempt to delete the hosted zone
+	if hostedZoneID != "" {
+		tflog.Info(ctx, "Deleting hosted zone", map[string]interface{}{
+			"domain":         domainName,
+			"hosted_zone_id": hostedZoneID,
+		})
+
+		_, err := r.route53Client.DeleteHostedZone(ctx, &route53.DeleteHostedZoneInput{
+			Id: aws.String(hostedZoneID),
+		})
+		if err != nil {
+			tflog.Warn(ctx, "Could not delete hosted zone (may have records)", map[string]interface{}{
+				"domain":         domainName,
+				"hosted_zone_id": hostedZoneID,
+				"error":          err.Error(),
+			})
+			// Don't fail the destroy - domain is already deleted, zone cleanup is best-effort
+		} else {
+			tflog.Info(ctx, "Hosted zone deleted", map[string]interface{}{
+				"domain":         domainName,
+				"hosted_zone_id": hostedZoneID,
+			})
+		}
+	}
 }
 
 func (r *DomainRegistrationResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {

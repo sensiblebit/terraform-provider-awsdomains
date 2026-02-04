@@ -15,7 +15,7 @@ terraform {
   required_providers {
     awsdomains = {
       source  = "sensiblebit/awsdomains"
-      version = "~> 1.0"
+      version = "~> 1.1"
     }
   }
 }
@@ -23,6 +23,35 @@ terraform {
 provider "awsdomains" {
   region  = "us-east-1"
   profile = "default"
+}
+
+resource "awsdomains_domain" "example" {
+  domain_name    = "example.com"
+  duration_years = 1
+
+  admin_contact = {
+    first_name     = "John"
+    last_name      = "Doe"
+    email          = "admin@example.com"
+    phone_number   = "+1.5551234567"
+    address_line_1 = "123 Main St"
+    city           = "Seattle"
+    state          = "WA"
+    zip_code       = "98101"
+    country_code   = "US"
+  }
+
+  registrant_contact = { /* same structure */ }
+  tech_contact       = { /* same structure */ }
+}
+
+# Use the auto-created hosted zone directly - no data source needed!
+resource "aws_route53_record" "www" {
+  zone_id = awsdomains_domain.example.hosted_zone_id
+  name    = "www.example.com"
+  type    = "A"
+  ttl     = 300
+  records = ["192.0.2.1"]
 }
 ```
 
@@ -61,7 +90,9 @@ The provider uses the AWS SDK for Go v2 and supports the standard AWS authentica
         "route53domains:DeleteDomain",
         "route53domains:ListDomains",
         "route53domains:CheckDomainAvailability",
-        "route53domains:ListPrices"
+        "route53domains:ListPrices",
+        "route53:ListHostedZonesByName",
+        "route53:DeleteHostedZone"
       ],
       "Resource": "*"
     }

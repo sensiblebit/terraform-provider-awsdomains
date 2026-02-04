@@ -14,9 +14,9 @@ import (
 
 // MockRoute53DomainsClient is a mock implementation for testing
 type MockRoute53DomainsClient struct {
-	GetDomainDetailFunc        func(ctx context.Context, params *route53domains.GetDomainDetailInput, optFns ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error)
-	RegisterDomainFunc         func(ctx context.Context, params *route53domains.RegisterDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.RegisterDomainOutput, error)
-	GetOperationDetailFunc     func(ctx context.Context, params *route53domains.GetOperationDetailInput, optFns ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error)
+	GetDomainDetailFunc         func(ctx context.Context, params *route53domains.GetDomainDetailInput, optFns ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error)
+	RegisterDomainFunc          func(ctx context.Context, params *route53domains.RegisterDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.RegisterDomainOutput, error)
+	GetOperationDetailFunc      func(ctx context.Context, params *route53domains.GetOperationDetailInput, optFns ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error)
 	UpdateDomainNameserversFunc func(ctx context.Context, params *route53domains.UpdateDomainNameserversInput, optFns ...func(*route53domains.Options)) (*route53domains.UpdateDomainNameserversOutput, error)
 	CheckDomainAvailabilityFunc func(ctx context.Context, params *route53domains.CheckDomainAvailabilityInput, optFns ...func(*route53domains.Options)) (*route53domains.CheckDomainAvailabilityOutput, error)
 }
@@ -51,6 +51,7 @@ func TestResourceSchema(t *testing.T) {
 		"expiration_date",
 		"creation_date",
 		"registration_timeout",
+		"hosted_zone_id",
 	}
 
 	for _, attr := range requiredAttrs {

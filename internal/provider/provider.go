@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/route53"
 	"github.com/aws/aws-sdk-go-v2/service/route53domains"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
@@ -21,6 +22,12 @@ type AWSDomainsProvider struct {
 type AWSDomainsProviderModel struct {
 	Region  types.String `tfsdk:"region"`
 	Profile types.String `tfsdk:"profile"`
+}
+
+// ProviderData holds the AWS clients passed to resources and data sources
+type ProviderData struct {
+	DomainsClient *route53domains.Client
+	Route53Client *route53.Client
 }
 
 func New(version string) func() provider.Provider {
@@ -83,9 +90,16 @@ func (p *AWSDomainsProvider) Configure(ctx context.Context, req provider.Configu
 		return
 	}
 
-	client := route53domains.NewFromConfig(cfg)
-	resp.DataSourceData = client
-	resp.ResourceData = client
+	domainsClient := route53domains.NewFromConfig(cfg)
+	route53Client := route53.NewFromConfig(cfg)
+
+	providerData := &ProviderData{
+		DomainsClient: domainsClient,
+		Route53Client: route53Client,
+	}
+
+	resp.DataSourceData = providerData
+	resp.ResourceData = providerData
 }
 
 func (p *AWSDomainsProvider) Resources(ctx context.Context) []func() resource.Resource {

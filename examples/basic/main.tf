@@ -2,7 +2,7 @@ terraform {
   required_providers {
     awsdomains = {
       source  = "sensiblebit/awsdomains"
-      version = "~> 1.0"
+      version = "~> 1.1"
     }
   }
 }
@@ -75,9 +75,16 @@ resource "awsdomains_domain" "example" {
 }
 
 output "domain_status" {
-  value = awsdomains_domain.example.status
+  description = "Current status of the domain"
+  value       = awsdomains_domain.example.status
 }
 
 output "expiration_date" {
-  value = awsdomains_domain.example.expiration_date
+  description = "Domain expiration date"
+  value       = awsdomains_domain.example.expiration_date
+}
+
+output "hosted_zone_id" {
+  description = "Route53 hosted zone ID for the domain"
+  value       = awsdomains_domain.example.hosted_zone_id
 }
