@@ -161,6 +161,7 @@ resource "awsdomains_domain" "example" {
 - `hosted_zone_id` (String) The Route53 hosted zone ID automatically created for this domain.
 
 <a id="nestedatt--contact"></a>
+
 ### Contact
 
 Required:

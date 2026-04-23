@@ -1,0 +1,16 @@
+repos:
+  - repo: https://github.com/sensiblebit/.github
+    rev: "ad268a51ad8ce705d2e1d4010700a334ea3ea3f9"
+    hooks:
+      - id: go-mod-update
+        stages: [pre-commit]
+      - id: goimports
+      - id: go-fix
+      - id: markdownlint
+        args: [--config, .markdownlint.yaml]
+      - id: actionlint
+      - id: go-vet
+      - id: golangci-lint
+      - id: govulncheck
+      - id: go-build
+      - id: go-test

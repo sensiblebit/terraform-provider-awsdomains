@@ -1,3 +1,4 @@
+// Package provider implements the Terraform provider for Route53 Domains resources.
 package provider
 
 import (
@@ -15,21 +16,24 @@ import (
 
 var _ provider.Provider = &AWSDomainsProvider{}
 
+// AWSDomainsProvider implements the Terraform provider entrypoint.
 type AWSDomainsProvider struct {
 	version string
 }
 
+// AWSDomainsProviderModel stores provider configuration values.
 type AWSDomainsProviderModel struct {
 	Region  types.String `tfsdk:"region"`
 	Profile types.String `tfsdk:"profile"`
 }
 
-// ProviderData holds the AWS clients passed to resources and data sources
-type ProviderData struct {
+// providerData holds the AWS clients passed to resources and data sources.
+type providerData struct {
 	DomainsClient *route53domains.Client
 	Route53Client *route53.Client
 }
 
+// New returns a provider factory for Terraform.
 func New(version string) func() provider.Provider {
 	return func() provider.Provider {
 		return &AWSDomainsProvider{
@@ -38,12 +42,14 @@ func New(version string) func() provider.Provider {
 	}
 }
 
-func (p *AWSDomainsProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
+// Metadata sets the provider type name and version.
+func (p *AWSDomainsProvider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
 	resp.TypeName = "awsdomains"
 	resp.Version = p.version
 }
 
-func (p *AWSDomainsProvider) Schema(ctx context.Context, req provider.SchemaRequest, resp *provider.SchemaResponse) {
+// Schema describes the provider-level configuration.
+func (p *AWSDomainsProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "Provider for managing AWS Route53 domain registrations with full lifecycle support.",
 		Attributes: map[string]schema.Attribute{
@@ -59,6 +65,7 @@ func (p *AWSDomainsProvider) Schema(ctx context.Context, req provider.SchemaRequ
 	}
 }
 
+// Configure creates AWS service clients and shares them with resources and data sources.
 func (p *AWSDomainsProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
 	var data AWSDomainsProviderModel
 
@@ -93,7 +100,7 @@ func (p *AWSDomainsProvider) Configure(ctx context.Context, req provider.Configu
 	domainsClient := route53domains.NewFromConfig(cfg)
 	route53Client := route53.NewFromConfig(cfg)
 
-	providerData := &ProviderData{
+	providerData := &providerData{
 		DomainsClient: domainsClient,
 		Route53Client: route53Client,
 	}
@@ -102,13 +109,15 @@ func (p *AWSDomainsProvider) Configure(ctx context.Context, req provider.Configu
 	resp.ResourceData = providerData
 }
 
-func (p *AWSDomainsProvider) Resources(ctx context.Context) []func() resource.Resource {
+// Resources returns the provider resources.
+func (p *AWSDomainsProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewDomainRegistrationResource,
 	}
 }
 
-func (p *AWSDomainsProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
+// DataSources returns the provider data sources.
+func (p *AWSDomainsProvider) DataSources(_ context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{
 		NewDomainAvailabilityDataSource,
 		NewDomainPriceDataSource,

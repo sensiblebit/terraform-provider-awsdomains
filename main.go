@@ -1,3 +1,4 @@
+// Package main serves the Terraform provider binary.
 package main
 
 import (
