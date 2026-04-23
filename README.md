@@ -158,13 +158,14 @@ terraform import 'awsdomains_domain.example' example.com
 
 ---
 
-# Technical Reference
+## Technical Reference
 
 ## Architecture
 
 ### Provider Framework
 
 Uses **Terraform Plugin Framework** (not SDK v2):
+
 - `github.com/hashicorp/terraform-plugin-framework`
 - Schema via structs with `tfsdk` tags
 - Resources implement `resource.Resource` interface
@@ -172,7 +173,7 @@ Uses **Terraform Plugin Framework** (not SDK v2):
 
 ### File Structure
 
-```
+```text
 internal/provider/
 ├── provider.go                      # Provider config, AWS client setup
 ├── domain_registration_resource.go  # Main resource (CRUD for domains)
@@ -182,7 +183,8 @@ internal/provider/
 
 ### AWS Clients
 
-Provider creates two clients via `ProviderData` struct:
+Provider creates two clients via `providerData`:
+
 - `DomainsClient`: `*route53domains.Client` - domain registration operations
 - `Route53Client`: `*route53.Client` - hosted zone lookups
 
@@ -191,6 +193,7 @@ Provider creates two clients via `ProviderData` struct:
 ## Resource Lifecycle
 
 ### Create
+
 1. `RegisterDomain` API call
 2. Poll `GetOperationDetail` until `SUCCESSFUL` or timeout
 3. `UpdateDomainNameservers` if specified
@@ -199,11 +202,13 @@ Provider creates two clients via `ProviderData` struct:
 6. Otherwise: `ListHostedZonesByName` to get hosted zone ID
 
 ### Read
+
 1. `GetDomainDetail` API call
 2. If error, removes resource from state (known issue - should distinguish 404)
 3. `ListHostedZonesByName` to refresh hosted zone ID
 
 ### Update
+
 1. `EnableDomainAutoRenew` / `DisableDomainAutoRenew` if changed
 2. `UpdateDomainNameservers` if changed
 3. `UpdateDomainContact` for contact changes
@@ -211,15 +216,18 @@ Provider creates two clients via `ProviderData` struct:
 5. Refresh state via `GetDomainDetail`
 
 ### Delete
+
 - `allow_delete = false` (default): removes from state only, domain persists
 - `allow_delete = true`: calls `DeleteDomain` API (may fail for some TLDs), then attempts to delete the hosted zone (best-effort, warns if zone has records)
 
 ### Import
+
 Uses `ImportStatePassthroughID` setting both `domain_name` and `id`.
 
 ## AWS API Reference
 
 ### Free Operations
+
 - `CheckDomainAvailability` - check availability
 - `ListPrices` - TLD pricing
 - `ListDomains` - list owned domains
@@ -227,11 +235,13 @@ Uses `ImportStatePassthroughID` setting both `domain_name` and `id`.
 - `ListHostedZonesByName` - find hosted zones
 
 ### Paid Operations
+
 - `RegisterDomain` - ~$12-35+ per TLD
 - `RenewDomain` - same as registration
 - `TransferDomain` - varies
 
 ### May Fail
+
 - `DeleteDomain` - not supported by all registries
 
 ## AWS Permissions
@@ -267,6 +277,7 @@ Uses `ImportStatePassthroughID` setting both `domain_name` and `id`.
 ## Testing
 
 ### Unit Tests (no AWS required)
+
 ```bash
 go test -v ./...
 ```
@@ -274,11 +285,13 @@ go test -v ./...
 ### Acceptance Tests
 
 **Free API tests** (safe, no cost):
+
 ```bash
 TF_ACC=1 go test -v ./... -run 'TestAccDomain(Availability|Price)'
 ```
 
 **Full resource tests** (EXPENSIVE - registers real domains):
+
 ```bash
 TF_ACC=1 go test -v ./... -run 'TestAccDomainRegistration' -timeout 30m
 ```
@@ -286,6 +299,7 @@ TF_ACC=1 go test -v ./... -run 'TestAccDomainRegistration' -timeout 30m
 ### Mock Client Pattern
 
 Current implementation uses concrete `*route53domains.Client`. To enable mocking:
+
 1. Define interface with required methods
 2. Have resource accept interface
 3. Inject mock in tests
@@ -293,6 +307,7 @@ Current implementation uses concrete `*route53domains.Client`. To enable mocking
 ## Common Issues
 
 ### "Cannot import non-existent remote object"
+
 - Provider not configured
 - AWS credentials missing/wrong profile
 - Domain doesn't exist in account
@@ -300,22 +315,27 @@ Current implementation uses concrete `*route53domains.Client`. To enable mocking
 Debug: `aws route53domains get-domain-detail --domain-name example.com --region us-east-1`
 
 ### "Invalid for_each argument"
+
 `for_each` with dynamic values (like `plantimestamp()`) fails at import. Workaround:
+
 1. Hardcode domain set
 2. Import
 3. Revert to dynamic
 
 ### Contact validation errors
+
 Phone must be E.164: `+1.5551234567`
 
 ## Development
 
 ### Build
+
 ```bash
 go build -o terraform-provider-awsdomains
 ```
 
 ### Local Testing
+
 ```hcl
 # ~/.terraformrc
 provider_installation {
@@ -327,6 +347,7 @@ provider_installation {
 ```
 
 ### Dependencies
+
 ```bash
 go get -u ./... && go mod tidy
 ```
@@ -347,7 +368,7 @@ go get -u ./... && go mod tidy
 - `contactModelToAWS()` converts TF models to AWS types
 - `planmodifier.UseStateForUnknown()` for computed fields
 - `stringplanmodifier.RequiresReplace()` for immutable fields
-- `ProviderData` struct passes multiple clients to resources
+- `providerData` passes multiple clients to resources
 
 ## Future Improvements
 

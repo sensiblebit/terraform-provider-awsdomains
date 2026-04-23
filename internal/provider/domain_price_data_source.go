@@ -1,3 +1,4 @@
+// Package provider implements the Terraform provider for Route53 Domains resources.
 package provider
 
 import (
@@ -12,10 +13,12 @@ import (
 
 var _ datasource.DataSource = &DomainPriceDataSource{}
 
+// DomainPriceDataSource returns Route53 Domains pricing information for a TLD.
 type DomainPriceDataSource struct {
 	client *route53domains.Client
 }
 
+// DomainPriceDataSourceModel stores pricing fields returned by the data source.
 type DomainPriceDataSourceModel struct {
 	ID                   types.String  `tfsdk:"id"`
 	TLD                  types.String  `tfsdk:"tld"`
@@ -27,15 +30,18 @@ type DomainPriceDataSourceModel struct {
 	Currency             types.String  `tfsdk:"currency"`
 }
 
+// NewDomainPriceDataSource creates the domain price data source.
 func NewDomainPriceDataSource() datasource.DataSource {
 	return &DomainPriceDataSource{}
 }
 
-func (d *DomainPriceDataSource) Metadata(ctx context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
+// Metadata sets the data source type name.
+func (d *DomainPriceDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_domain_price"
 }
 
-func (d *DomainPriceDataSource) Schema(ctx context.Context, req datasource.SchemaRequest, resp *datasource.SchemaResponse) {
+// Schema describes the data source attributes.
+func (d *DomainPriceDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "Get pricing information for a domain TLD.",
 		Attributes: map[string]schema.Attribute{
@@ -75,16 +81,17 @@ func (d *DomainPriceDataSource) Schema(ctx context.Context, req datasource.Schem
 	}
 }
 
-func (d *DomainPriceDataSource) Configure(ctx context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
+// Configure loads shared provider clients into the data source.
+func (d *DomainPriceDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	providerData, ok := req.ProviderData.(*ProviderData)
+	providerData, ok := req.ProviderData.(*providerData)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *ProviderData, got: %T", req.ProviderData),
+			fmt.Sprintf("Expected *providerData, got: %T", req.ProviderData),
 		)
 		return
 	}
@@ -92,6 +99,7 @@ func (d *DomainPriceDataSource) Configure(ctx context.Context, req datasource.Co
 	d.client = providerData.DomainsClient
 }
 
+// Read lists TLD pricing and returns the matching entry.
 func (d *DomainPriceDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	var data DomainPriceDataSourceModel
 
@@ -150,7 +158,7 @@ func (d *DomainPriceDataSource) Read(ctx context.Context, req datasource.ReadReq
 	if !found {
 		resp.Diagnostics.AddError(
 			"TLD not found",
-			fmt.Sprintf("No pricing information found for TLD: %s", tld),
+			"No pricing information found for TLD: "+tld,
 		)
 		return
 	}

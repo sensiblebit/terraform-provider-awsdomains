@@ -1,3 +1,4 @@
+// Package provider implements the Terraform provider for Route53 Domains resources.
 package provider
 
 import (
@@ -13,10 +14,12 @@ import (
 
 var _ datasource.DataSource = &DomainAvailabilityDataSource{}
 
+// DomainAvailabilityDataSource checks whether a domain can be registered.
 type DomainAvailabilityDataSource struct {
 	client *route53domains.Client
 }
 
+// DomainAvailabilityDataSourceModel stores the domain availability result.
 type DomainAvailabilityDataSourceModel struct {
 	ID           types.String `tfsdk:"id"`
 	DomainName   types.String `tfsdk:"domain_name"`
@@ -24,15 +27,18 @@ type DomainAvailabilityDataSourceModel struct {
 	Available    types.Bool   `tfsdk:"available"`
 }
 
+// NewDomainAvailabilityDataSource creates the domain availability data source.
 func NewDomainAvailabilityDataSource() datasource.DataSource {
 	return &DomainAvailabilityDataSource{}
 }
 
-func (d *DomainAvailabilityDataSource) Metadata(ctx context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
+// Metadata sets the data source type name.
+func (d *DomainAvailabilityDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_domain_availability"
 }
 
-func (d *DomainAvailabilityDataSource) Schema(ctx context.Context, req datasource.SchemaRequest, resp *datasource.SchemaResponse) {
+// Schema describes the data source attributes.
+func (d *DomainAvailabilityDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "Check if a domain name is available for registration.",
 		Attributes: map[string]schema.Attribute{
@@ -56,16 +62,17 @@ func (d *DomainAvailabilityDataSource) Schema(ctx context.Context, req datasourc
 	}
 }
 
-func (d *DomainAvailabilityDataSource) Configure(ctx context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
+// Configure loads shared provider clients into the data source.
+func (d *DomainAvailabilityDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	providerData, ok := req.ProviderData.(*ProviderData)
+	providerData, ok := req.ProviderData.(*providerData)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Data Source Configure Type",
-			fmt.Sprintf("Expected *ProviderData, got: %T", req.ProviderData),
+			fmt.Sprintf("Expected *providerData, got: %T", req.ProviderData),
 		)
 		return
 	}
@@ -73,6 +80,7 @@ func (d *DomainAvailabilityDataSource) Configure(ctx context.Context, req dataso
 	d.client = providerData.DomainsClient
 }
 
+// Read queries Route53 Domains for the requested domain name.
 func (d *DomainAvailabilityDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	var data DomainAvailabilityDataSourceModel
 

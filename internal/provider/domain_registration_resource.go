@@ -2,12 +2,14 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/route53"
+	route53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
 	"github.com/aws/aws-sdk-go-v2/service/route53domains"
 	"github.com/aws/aws-sdk-go-v2/service/route53domains/types"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -24,11 +26,31 @@ import (
 var _ resource.Resource = &DomainRegistrationResource{}
 var _ resource.ResourceWithImportState = &DomainRegistrationResource{}
 
+// DomainRegistrationResource manages Route53 Domains registrations.
 type DomainRegistrationResource struct {
 	client        *route53domains.Client
-	route53Client *route53.Client
+	route53Client route53API
 }
 
+type route53API interface {
+	ListHostedZonesByName(ctx context.Context, params *route53.ListHostedZonesByNameInput, optFns ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error)
+	ListResourceRecordSets(ctx context.Context, params *route53.ListResourceRecordSetsInput, optFns ...func(*route53.Options)) (*route53.ListResourceRecordSetsOutput, error)
+	DeleteHostedZone(ctx context.Context, params *route53.DeleteHostedZoneInput, optFns ...func(*route53.Options)) (*route53.DeleteHostedZoneOutput, error)
+}
+
+const (
+	registrarHostedZoneComment               = "HostedZone created by Route53 Registrar"
+	registrarHostedZoneCallerReferencePrefix = "RISWorkflow-RD:"
+)
+
+var (
+	errRegistrarHostedZoneNotFound        = errors.New("registrar-created hosted zone not found")
+	errMultipleRegistrarHostedZones       = errors.New("multiple registrar-created hosted zones found")
+	errRegistrarHostedZoneCommentMismatch = errors.New("hosted zone comment does not match expected registrar comment")
+	errHostedZoneHasCustomRecord          = errors.New("hosted zone has custom record, not deleting")
+)
+
+// ContactModel stores the contact fields used for domain registration.
 type ContactModel struct {
 	FirstName    tftypes.String `tfsdk:"first_name"`
 	LastName     tftypes.String `tfsdk:"last_name"`
@@ -43,6 +65,7 @@ type ContactModel struct {
 	ContactType  tftypes.String `tfsdk:"contact_type"`
 }
 
+// DomainRegistrationResourceModel stores Terraform state for the domain resource.
 type DomainRegistrationResourceModel struct {
 	ID                  tftypes.String   `tfsdk:"id"`
 	DomainName          tftypes.String   `tfsdk:"domain_name"`
@@ -64,11 +87,13 @@ type DomainRegistrationResourceModel struct {
 	HostedZoneID        tftypes.String   `tfsdk:"hosted_zone_id"`
 }
 
+// NewDomainRegistrationResource creates the domain registration resource.
 func NewDomainRegistrationResource() resource.Resource {
 	return &DomainRegistrationResource{}
 }
 
-func (r *DomainRegistrationResource) Metadata(ctx context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+// Metadata sets the resource type name.
+func (r *DomainRegistrationResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_domain"
 }
 
@@ -125,7 +150,8 @@ func contactSchema() schema.SingleNestedAttribute {
 	}
 }
 
-func (r *DomainRegistrationResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
+// Schema describes the resource attributes.
+func (r *DomainRegistrationResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "Registers and manages an AWS Route53 domain. By default, destroying this resource only removes it from Terraform state without deleting the actual domain. Set allow_delete = true to enable actual domain deletion on destroy.",
 		Attributes: map[string]schema.Attribute{
@@ -222,16 +248,17 @@ func (r *DomainRegistrationResource) Schema(ctx context.Context, req resource.Sc
 	}
 }
 
-func (r *DomainRegistrationResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+// Configure loads shared provider clients into the resource.
+func (r *DomainRegistrationResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
 
-	providerData, ok := req.ProviderData.(*ProviderData)
+	providerData, ok := req.ProviderData.(*providerData)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *ProviderData, got: %T", req.ProviderData),
+			fmt.Sprintf("Expected *providerData, got: %T", req.ProviderData),
 		)
 		return
 	}
@@ -270,30 +297,86 @@ func contactModelToAWS(m *ContactModel) *types.ContactDetail {
 	return contact
 }
 
-// findHostedZoneID looks up the Route53 hosted zone ID for a domain
-func (r *DomainRegistrationResource) findHostedZoneID(ctx context.Context, domainName string) (string, error) {
+func isExactHostedZoneName(zoneName, domainName string) bool {
+	return strings.TrimSuffix(zoneName, ".") == domainName
+}
+
+func selectRegistrarHostedZone(domainName string, zones []route53types.HostedZone) (*route53types.HostedZone, error) {
+	var matches []route53types.HostedZone
+
+	for _, zone := range zones {
+		if !isExactHostedZoneName(aws.ToString(zone.Name), domainName) {
+			continue
+		}
+		if zone.Config != nil && zone.Config.PrivateZone {
+			continue
+		}
+		if !strings.HasPrefix(aws.ToString(zone.CallerReference), registrarHostedZoneCallerReferencePrefix) {
+			continue
+		}
+
+		matches = append(matches, zone)
+	}
+
+	switch len(matches) {
+	case 0:
+		return nil, fmt.Errorf("%w: %s", errRegistrarHostedZoneNotFound, domainName)
+	case 1:
+		return &matches[0], nil
+	default:
+		return nil, fmt.Errorf("%w: %s", errMultipleRegistrarHostedZones, domainName)
+	}
+}
+
+func (r *DomainRegistrationResource) listExactHostedZones(ctx context.Context, domainName string) ([]route53types.HostedZone, error) {
 	input := &route53.ListHostedZonesByNameInput{
 		DNSName:  aws.String(domainName),
-		MaxItems: aws.Int32(1),
+		MaxItems: aws.Int32(100),
 	}
 
-	output, err := r.route53Client.ListHostedZonesByName(ctx, input)
-	if err != nil {
-		return "", fmt.Errorf("failed to list hosted zones: %w", err)
-	}
+	var zones []route53types.HostedZone
 
-	// Find exact match (AWS returns zones starting with the name)
-	for _, zone := range output.HostedZones {
-		// Zone names have trailing dot, domain names don't
-		zoneName := strings.TrimSuffix(aws.ToString(zone.Name), ".")
-		if zoneName == domainName {
-			// Zone ID format is "/hostedzone/Z1234567890ABC" - extract just the ID
-			zoneID := strings.TrimPrefix(aws.ToString(zone.Id), "/hostedzone/")
-			return zoneID, nil
+	for {
+		output, err := r.route53Client.ListHostedZonesByName(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list hosted zones: %w", err)
+		}
+
+		for _, zone := range output.HostedZones {
+			zoneName := strings.TrimSuffix(aws.ToString(zone.Name), ".")
+			if zoneName == domainName {
+				zones = append(zones, zone)
+				continue
+			}
+
+			return zones, nil
+		}
+
+		if !output.IsTruncated || output.NextDNSName == nil {
+			return zones, nil
+		}
+
+		input = &route53.ListHostedZonesByNameInput{
+			DNSName:      output.NextDNSName,
+			HostedZoneId: output.NextHostedZoneId,
+			MaxItems:     aws.Int32(100),
 		}
 	}
+}
 
-	return "", fmt.Errorf("hosted zone not found for domain %s", domainName)
+// findHostedZoneID looks up the registrar-created Route53 hosted zone ID for a domain
+func (r *DomainRegistrationResource) findHostedZoneID(ctx context.Context, domainName string) (string, error) {
+	zones, err := r.listExactHostedZones(ctx, domainName)
+	if err != nil {
+		return "", err
+	}
+
+	zone, err := selectRegistrarHostedZone(domainName, zones)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimPrefix(aws.ToString(zone.Id), "/hostedzone/"), nil
 }
 
 // deleteRegistrarHostedZone safely deletes the hosted zone only if ALL conditions are met:
@@ -302,52 +385,37 @@ func (r *DomainRegistrationResource) findHostedZoneID(ctx context.Context, domai
 // 3. Zone comment is "HostedZone created by Route53 Registrar"
 // 4. Zone contains only NS and SOA records (no custom records)
 func (r *DomainRegistrationResource) deleteRegistrarHostedZone(ctx context.Context, domainName string) error {
-	input := &route53.ListHostedZonesByNameInput{
-		DNSName:  aws.String(domainName),
-		MaxItems: aws.Int32(1),
-	}
-
-	output, err := r.route53Client.ListHostedZonesByName(ctx, input)
+	zones, err := r.listExactHostedZones(ctx, domainName)
 	if err != nil {
-		return fmt.Errorf("failed to list hosted zones: %w", err)
+		return err
 	}
 
-	// Find exact match
-	for _, zone := range output.HostedZones {
-		zoneName := strings.TrimSuffix(aws.ToString(zone.Name), ".")
-		if zoneName != domainName {
-			continue
-		}
+	zone, err := selectRegistrarHostedZone(domainName, zones)
+	if err != nil {
+		return err
+	}
 
-		zoneID := aws.ToString(zone.Id)
+	zoneID := aws.ToString(zone.Id)
 
-		// Safety check 1: must be public zone
-		if zone.Config != nil && zone.Config.PrivateZone {
-			tflog.Warn(ctx, "Hosted zone is private, skipping deletion", map[string]interface{}{
-				"domain":  domainName,
-				"zone_id": zoneID,
-			})
-			return fmt.Errorf("hosted zone is private, not deleting")
-		}
-
-		// Safety check 2: must have registrar comment
-		comment := ""
-		if zone.Config != nil && zone.Config.Comment != nil {
-			comment = *zone.Config.Comment
-		}
-		if comment != "HostedZone created by Route53 Registrar" {
-			tflog.Warn(ctx, "Hosted zone not created by Route53 Registrar, skipping deletion", map[string]interface{}{
-				"domain":  domainName,
-				"zone_id": zoneID,
-				"comment": comment,
-			})
-			return fmt.Errorf("hosted zone comment %q does not match expected registrar comment", comment)
-		}
-
-		// Safety check 3: must only have NS and SOA records
-		recordsOutput, err := r.route53Client.ListResourceRecordSets(ctx, &route53.ListResourceRecordSetsInput{
-			HostedZoneId: aws.String(zoneID),
+	comment := ""
+	if zone.Config != nil && zone.Config.Comment != nil {
+		comment = *zone.Config.Comment
+	}
+	if comment != registrarHostedZoneComment {
+		tflog.Warn(ctx, "Hosted zone not created by Route53 Registrar, skipping deletion", map[string]any{
+			"domain":  domainName,
+			"zone_id": zoneID,
+			"comment": comment,
 		})
+		return fmt.Errorf("%w: %q", errRegistrarHostedZoneCommentMismatch, comment)
+	}
+
+	listInput := &route53.ListResourceRecordSetsInput{
+		HostedZoneId: aws.String(zoneID),
+	}
+
+	for {
+		recordsOutput, err := r.route53Client.ListResourceRecordSets(ctx, listInput)
 		if err != nil {
 			return fmt.Errorf("failed to list records in hosted zone: %w", err)
 		}
@@ -355,35 +423,41 @@ func (r *DomainRegistrationResource) deleteRegistrarHostedZone(ctx context.Conte
 		for _, record := range recordsOutput.ResourceRecordSets {
 			recordType := string(record.Type)
 			if recordType != "NS" && recordType != "SOA" {
-				tflog.Warn(ctx, "Hosted zone has custom records, skipping deletion", map[string]interface{}{
+				tflog.Warn(ctx, "Hosted zone has custom records, skipping deletion", map[string]any{
 					"domain":      domainName,
 					"zone_id":     zoneID,
 					"record_name": aws.ToString(record.Name),
 					"record_type": recordType,
 				})
-				return fmt.Errorf("hosted zone has custom record %s %s, not deleting", aws.ToString(record.Name), recordType)
+				return fmt.Errorf("%w: %s %s", errHostedZoneHasCustomRecord, aws.ToString(record.Name), recordType)
 			}
 		}
 
-		// All checks passed - safe to delete
-		tflog.Info(ctx, "Deleting Route53 Registrar hosted zone", map[string]interface{}{
-			"domain":  domainName,
-			"zone_id": zoneID,
-		})
-
-		_, err = r.route53Client.DeleteHostedZone(ctx, &route53.DeleteHostedZoneInput{
-			Id: aws.String(zoneID),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to delete hosted zone: %w", err)
+		if !recordsOutput.IsTruncated {
+			break
 		}
 
-		return nil
+		listInput.StartRecordName = recordsOutput.NextRecordName
+		listInput.StartRecordType = recordsOutput.NextRecordType
+		listInput.StartRecordIdentifier = recordsOutput.NextRecordIdentifier
 	}
 
-	return fmt.Errorf("hosted zone not found for domain %s", domainName)
+	tflog.Info(ctx, "Deleting Route53 Registrar hosted zone", map[string]any{
+		"domain":  domainName,
+		"zone_id": zoneID,
+	})
+
+	_, err = r.route53Client.DeleteHostedZone(ctx, &route53.DeleteHostedZoneInput{
+		Id: aws.String(zoneID),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete hosted zone: %w", err)
+	}
+
+	return nil
 }
 
+// Create registers the domain and records its hosted zone metadata.
 func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var data DomainRegistrationResourceModel
 
@@ -393,14 +467,23 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 	}
 
 	domainName := data.DomainName.ValueString()
-	tflog.Info(ctx, "Registering domain", map[string]interface{}{
+	tflog.Info(ctx, "Registering domain", map[string]any{
 		"domain": domainName,
 	})
+
+	durationYears := data.DurationYears.ValueInt64()
+	if durationYears < 1 || durationYears > 10 {
+		resp.Diagnostics.AddError(
+			"Invalid duration_years value",
+			fmt.Sprintf("Expected duration_years to be between 1 and 10, got %d", durationYears),
+		)
+		return
+	}
 
 	// Build registration request
 	registerInput := &route53domains.RegisterDomainInput{
 		DomainName:                      aws.String(domainName),
-		DurationInYears:                 aws.Int32(int32(data.DurationYears.ValueInt64())),
+		DurationInYears:                 aws.Int32(int32(durationYears)),
 		AutoRenew:                       aws.Bool(data.AutoRenew.ValueBool()),
 		AdminContact:                    contactModelToAWS(data.AdminContact),
 		RegistrantContact:               contactModelToAWS(data.RegistrantContact),
@@ -420,7 +503,7 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 		return
 	}
 
-	tflog.Info(ctx, "Domain registration initiated", map[string]interface{}{
+	tflog.Info(ctx, "Domain registration initiated", map[string]any{
 		"domain":       domainName,
 		"operation_id": *registerOutput.OperationId,
 	})
@@ -441,7 +524,7 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 			return
 		}
 
-		tflog.Debug(ctx, "Registration operation status", map[string]interface{}{
+		tflog.Debug(ctx, "Registration operation status", map[string]any{
 			"domain": domainName,
 			"status": opDetail.Status,
 		})
@@ -510,7 +593,7 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 		data.CreationDate = tftypes.StringValue(domainDetail.CreationDate.Format(time.RFC3339))
 	}
 	if len(domainDetail.StatusList) > 0 {
-		data.Status = tftypes.StringValue(string(domainDetail.StatusList[0]))
+		data.Status = tftypes.StringValue(domainDetail.StatusList[0])
 	}
 
 	// Handle the auto-created hosted zone
@@ -518,7 +601,7 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 		// Delete the registrar-created hosted zone
 		err := r.deleteRegistrarHostedZone(ctx, domainName)
 		if err != nil {
-			tflog.Warn(ctx, "Could not delete hosted zone", map[string]interface{}{
+			tflog.Warn(ctx, "Could not delete hosted zone", map[string]any{
 				"domain": domainName,
 				"error":  err.Error(),
 			})
@@ -529,7 +612,7 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 				data.HostedZoneID = tftypes.StringNull()
 			}
 		} else {
-			tflog.Info(ctx, "Deleted auto-created hosted zone", map[string]interface{}{
+			tflog.Info(ctx, "Deleted auto-created hosted zone", map[string]any{
 				"domain": domainName,
 			})
 			data.HostedZoneID = tftypes.StringNull()
@@ -538,7 +621,7 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 		// Look up the auto-created hosted zone
 		hostedZoneID, err := r.findHostedZoneID(ctx, domainName)
 		if err != nil {
-			tflog.Warn(ctx, "Could not find hosted zone for domain", map[string]interface{}{
+			tflog.Warn(ctx, "Could not find hosted zone for domain", map[string]any{
 				"domain": domainName,
 				"error":  err.Error(),
 			})
@@ -551,6 +634,7 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
+// Read refreshes the resource state from Route53 Domains.
 func (r *DomainRegistrationResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var data DomainRegistrationResourceModel
 
@@ -582,7 +666,7 @@ func (r *DomainRegistrationResource) Read(ctx context.Context, req resource.Read
 		data.CreationDate = tftypes.StringValue(domainDetail.CreationDate.Format(time.RFC3339))
 	}
 	if len(domainDetail.StatusList) > 0 {
-		data.Status = tftypes.StringValue(string(domainDetail.StatusList[0]))
+		data.Status = tftypes.StringValue(domainDetail.StatusList[0])
 	}
 
 	// Update nameservers from AWS
@@ -605,6 +689,7 @@ func (r *DomainRegistrationResource) Read(ctx context.Context, req resource.Read
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
+// Update applies mutable domain settings and refreshes state.
 func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var data DomainRegistrationResourceModel
 	var state DomainRegistrationResourceModel
@@ -716,12 +801,13 @@ func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.Up
 		data.CreationDate = tftypes.StringValue(domainDetail.CreationDate.Format(time.RFC3339))
 	}
 	if len(domainDetail.StatusList) > 0 {
-		data.Status = tftypes.StringValue(string(domainDetail.StatusList[0]))
+		data.Status = tftypes.StringValue(domainDetail.StatusList[0])
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
+// Delete removes the domain when allowed and performs best-effort zone cleanup.
 func (r *DomainRegistrationResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var data DomainRegistrationResourceModel
 
@@ -734,14 +820,14 @@ func (r *DomainRegistrationResource) Delete(ctx context.Context, req resource.De
 
 	// Check if deletion is allowed
 	if !data.AllowDelete.ValueBool() {
-		tflog.Warn(ctx, "Domain will be removed from state only (allow_delete = false)", map[string]interface{}{
+		tflog.Warn(ctx, "Domain will be removed from state only (allow_delete = false)", map[string]any{
 			"domain": domainName,
 		})
 		// Just remove from state, don't actually delete
 		return
 	}
 
-	tflog.Warn(ctx, "DELETING DOMAIN REGISTRATION (allow_delete = true)", map[string]interface{}{
+	tflog.Warn(ctx, "DELETING DOMAIN REGISTRATION (allow_delete = true)", map[string]any{
 		"domain": domainName,
 	})
 
@@ -758,25 +844,26 @@ func (r *DomainRegistrationResource) Delete(ctx context.Context, req resource.De
 		return
 	}
 
-	tflog.Info(ctx, "Domain deletion initiated", map[string]interface{}{
+	tflog.Info(ctx, "Domain deletion initiated", map[string]any{
 		"domain": domainName,
 	})
 
 	// Attempt to delete the registrar-created hosted zone (safe - only deletes if all safeguards pass)
 	err = r.deleteRegistrarHostedZone(ctx, domainName)
 	if err != nil {
-		tflog.Warn(ctx, "Could not delete hosted zone", map[string]interface{}{
+		tflog.Warn(ctx, "Could not delete hosted zone", map[string]any{
 			"domain": domainName,
 			"error":  err.Error(),
 		})
 		// Don't fail the destroy - domain is already deleted, zone cleanup is best-effort
 	} else {
-		tflog.Info(ctx, "Hosted zone deleted", map[string]interface{}{
+		tflog.Info(ctx, "Hosted zone deleted", map[string]any{
 			"domain": domainName,
 		})
 	}
 }
 
+// ImportState imports the domain resource by its domain name.
 func (r *DomainRegistrationResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("domain_name"), req, resp)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
