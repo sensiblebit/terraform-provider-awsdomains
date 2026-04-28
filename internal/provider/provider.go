@@ -74,7 +74,7 @@ func (p *AWSDomainsProvider) Schema(_ context.Context, _ provider.SchemaRequest,
 				Description: "Default tags to apply to all taggable resources managed by this provider.",
 				Attributes: map[string]schema.Attribute{
 					"tags": schema.MapAttribute{
-						Required:    true,
+						Optional:    true,
 						ElementType: types.StringType,
 						Description: "Map of default tag keys and values. Resource-level tags override default tags with the same key.",
 					},
