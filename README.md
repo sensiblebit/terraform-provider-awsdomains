@@ -283,6 +283,9 @@ Uses `ImportStatePassthroughID` setting both `domain_name` and `id`.
         "route53domains:EnableDomainAutoRenew",
         "route53domains:DisableDomainAutoRenew",
         "route53domains:DeleteDomain",
+        "route53domains:ListTagsForDomain",
+        "route53domains:UpdateTagsForDomain",
+        "route53domains:DeleteTagsForDomain",
         "route53domains:CheckDomainAvailability",
         "route53domains:ListPrices",
         "route53:ListHostedZonesByName",
@@ -294,8 +297,6 @@ Uses `ImportStatePassthroughID` setting both `domain_name` and `id`.
   ]
 }
 ```
-
-Add `route53domains:ListTagsForDomain`, `route53domains:UpdateTagsForDomain`, and `route53domains:DeleteTagsForDomain` when using provider `default_tags`, resource `tags`, or managing resources that already have tracked tags in state.
 
 ## Testing
 

@@ -792,7 +792,7 @@ func TestReadKeepsPendingRegistrationStateWhenDomainDetailFails(t *testing.T) {
 	}
 }
 
-func TestReadKeepsUnhydratedRegistrationStateWithOperationIDWhenDomainDetailFails(t *testing.T) {
+func TestReadReturnsErrorForSuccessfulRegistrationWhenDomainDetailFails(t *testing.T) {
 	ctx := context.Background()
 	state := testDomainModel(t, "example.com")
 	state.Status = tftypes.StringNull()
@@ -818,17 +818,14 @@ func TestReadKeepsUnhydratedRegistrationStateWithOperationIDWhenDomainDetailFail
 
 	domainResource.Read(ctx, req, resp)
 
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("Read returned error diagnostics: %v", resp.Diagnostics)
-	}
-	if len(resp.Diagnostics) == 0 {
-		t.Fatal("expected warning diagnostic for unhydrated registration detail read failure")
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected detail read failure to return an error after registration succeeded")
 	}
 
 	var got DomainRegistrationResourceModel
-	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("reading response state returned diagnostics: %v", resp.Diagnostics)
+	diags := resp.State.Get(ctx, &got)
+	if diags.HasError() {
+		t.Fatalf("reading response state returned diagnostics: %v", diags)
 	}
 	if got.ID.ValueString() != "example.com" {
 		t.Fatalf("id = %q, want %q", got.ID.ValueString(), "example.com")
@@ -838,6 +835,44 @@ func TestReadKeepsUnhydratedRegistrationStateWithOperationIDWhenDomainDetailFail
 	}
 	if got.RegistrationOperationID.ValueString() != "op-123" {
 		t.Fatalf("registration_operation_id = %q, want %q", got.RegistrationOperationID.ValueString(), "op-123")
+	}
+}
+
+func TestReadClearsRegistrationOperationIDWhenDomainHydrates(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	state.RegistrationOperationID = tftypes.StringValue("op-123")
+
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			GetDomainDetailFunc: func(context.Context, *route53domains.GetDomainDetailInput, ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				return MockDomainDetailResponse("example.com"), nil
+			},
+		},
+		route53Client: &MockRoute53Client{
+			ListHostedZonesByNameFunc: func(context.Context, *route53.ListHostedZonesByNameInput, ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error) {
+				return &route53.ListHostedZonesByNameOutput{}, nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceReadRequest(t, schema, state)
+	resp := &resource.ReadResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Read(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	var got DomainRegistrationResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("reading response state returned diagnostics: %v", resp.Diagnostics)
+	}
+	if !got.RegistrationOperationID.IsNull() {
+		t.Fatalf("registration_operation_id = %q, want null", got.RegistrationOperationID.ValueString())
 	}
 }
 
@@ -1057,6 +1092,58 @@ func TestUpdateDeletesHostedZoneWhenDeleteHostedZoneEnabled(t *testing.T) {
 	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("reading response state returned diagnostics: %v", resp.Diagnostics)
+	}
+	if !got.HostedZoneID.IsNull() {
+		t.Fatalf("hosted_zone_id = %q, want null", got.HostedZoneID.ValueString())
+	}
+}
+
+func TestUpdateTreatsMissingHostedZoneAsDeleted(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	state.DeleteHostedZone = tftypes.BoolValue(false)
+	state.HostedZoneID = tftypes.StringValue("ZREG")
+	plan := state
+	plan.DeleteHostedZone = tftypes.BoolValue(true)
+
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			GetDomainDetailFunc: func(_ context.Context, _ *route53domains.GetDomainDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				return MockDomainDetailResponse("example.com"), nil
+			},
+		},
+		route53Client: &MockRoute53Client{
+			ListHostedZonesByNameFunc: func(context.Context, *route53.ListHostedZonesByNameInput, ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error) {
+				return &route53.ListHostedZonesByNameOutput{}, nil
+			},
+			ListResourceRecordSetsFunc: func(context.Context, *route53.ListResourceRecordSetsInput, ...func(*route53.Options)) (*route53.ListResourceRecordSetsOutput, error) {
+				t.Fatal("ListResourceRecordSets must not be called when registrar hosted zone is absent")
+				return nil, errUnexpectedMockRoute53Call
+			},
+			DeleteHostedZoneFunc: func(context.Context, *route53.DeleteHostedZoneInput, ...func(*route53.Options)) (*route53.DeleteHostedZoneOutput, error) {
+				t.Fatal("DeleteHostedZone must not be called when registrar hosted zone is absent")
+				return nil, errUnexpectedMockRoute53Call
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceUpdateRequest(t, schema, plan, state)
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Update(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	var got DomainRegistrationResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("reading response state returned diagnostics: %v", resp.Diagnostics)
+	}
+	if !got.DeleteHostedZone.ValueBool() {
+		t.Fatal("delete_hosted_zone was not persisted")
 	}
 	if !got.HostedZoneID.IsNull() {
 		t.Fatalf("hosted_zone_id = %q, want null", got.HostedZoneID.ValueString())

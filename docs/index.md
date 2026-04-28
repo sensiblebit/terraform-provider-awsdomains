@@ -110,6 +110,9 @@ Route53 Domains allows up to 50 merged provider and resource tags. Tag keys must
         "route53domains:DisableDomainAutoRenew",
         "route53domains:DeleteDomain",
         "route53domains:ListDomains",
+        "route53domains:ListTagsForDomain",
+        "route53domains:UpdateTagsForDomain",
+        "route53domains:DeleteTagsForDomain",
         "route53domains:CheckDomainAvailability",
         "route53domains:ListPrices",
         "route53:ListHostedZonesByName",
@@ -121,5 +124,3 @@ Route53 Domains allows up to 50 merged provider and resource tags. Tag keys must
   ]
 }
 ```
-
-Add `route53domains:ListTagsForDomain`, `route53domains:UpdateTagsForDomain`, and `route53domains:DeleteTagsForDomain` when using provider `default_tags`, resource `tags`, or managing resources that already have tracked tags in state.

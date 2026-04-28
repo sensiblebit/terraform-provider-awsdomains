@@ -253,7 +253,7 @@ func (r *DomainRegistrationResource) Schema(_ context.Context, _ resource.Schema
 			"tags_all": schema.MapAttribute{
 				Computed:    true,
 				ElementType: tftypes.StringType,
-				Description: "All tags applied to the domain, including provider default_tags and resource-level tags.",
+				Description: "Tags managed by this provider, including provider default_tags and resource-level tags.",
 				PlanModifiers: []planmodifier.Map{
 					mapplanmodifier.UseStateForUnknown(),
 				},
@@ -763,11 +763,11 @@ func (r *DomainRegistrationResource) handleRegistrationReadError(ctx context.Con
 		return true
 	case types.OperationStatusSuccessful:
 		data.Status = tftypes.StringValue(string(opDetail.Status))
-		resp.Diagnostics.AddWarning(
-			"Domain Details Refresh Failed",
-			fmt.Sprintf("Registration operation %s for %s completed successfully, but domain details could not be read: %s. The resource will remain in Terraform state so a later refresh can reconcile computed fields instead of launching another registration.", operationID, domainName, readErr.Error()),
-		)
 		resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
+		resp.Diagnostics.AddError(
+			"Domain Details Refresh Failed",
+			fmt.Sprintf("Registration operation %s for %s completed successfully, but domain details could not be read: %s. Terraform will keep the resource in state so a later refresh can reconcile computed fields instead of launching another registration.", operationID, domainName, readErr.Error()),
+		)
 		return true
 	default:
 		if opDetail.Status != "" {
@@ -804,6 +804,7 @@ func (r *DomainRegistrationResource) populateDomainDetailState(ctx context.Conte
 	if len(domainDetail.StatusList) > 0 {
 		data.Status = tftypes.StringValue(domainDetail.StatusList[0])
 	}
+	data.RegistrationOperationID = tftypes.StringNull()
 
 	data.AdminContact = awsContactToModel(domainDetail.AdminContact, data.AdminContact)
 	data.RegistrantContact = awsContactToModel(domainDetail.RegistrantContact, data.RegistrantContact)
@@ -1536,13 +1537,21 @@ func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.Up
 
 	if shouldDeleteRegistrarHostedZone(data, state) {
 		if err := r.deleteRegistrarHostedZone(ctx, domainName); err != nil {
-			resp.Diagnostics.AddError(
-				"Error deleting hosted zone",
-				fmt.Sprintf("Could not delete the registrar-created hosted zone for %s: %s", domainName, err.Error()),
-			)
-			return
+			if errors.Is(err, errRegistrarHostedZoneNotFound) {
+				tflog.Info(ctx, "Registrar-created hosted zone already absent", map[string]any{
+					"domain": domainName,
+				})
+				data.HostedZoneID = tftypes.StringNull()
+			} else {
+				resp.Diagnostics.AddError(
+					"Error deleting hosted zone",
+					fmt.Sprintf("Could not delete the registrar-created hosted zone for %s: %s", domainName, err.Error()),
+				)
+				return
+			}
+		} else {
+			data.HostedZoneID = tftypes.StringNull()
 		}
-		data.HostedZoneID = tftypes.StringNull()
 	}
 
 	// Refresh state
