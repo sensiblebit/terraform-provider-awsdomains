@@ -91,6 +91,8 @@ resource "aws_route53_record" "apex" {
 | `delete_hosted_zone` | bool | No | `false` | Delete auto-created hosted zone (for external DNS) |
 | `registration_timeout` | number | No | `900` | Timeout in seconds |
 
+Route53 Domains allows up to 50 merged provider and resource tags. Tag keys must be 1-128 characters, values must be 0-256 characters, and both may contain only letters, numbers, spaces, and `. : / = + - @`.
+
 ### Attributes (Read-Only)
 
 | Name | Description |
@@ -211,8 +213,8 @@ Provider creates two clients via `providerData`:
 
 1. `RegisterDomain` API call
 2. Poll `GetOperationDetail` until `SUCCESSFUL` or timeout
-3. `UpdateTagsForDomain` with merged provider/resource tags if any tags are configured
-4. `UpdateDomainNameservers` if specified
+3. `UpdateTagsForDomain` with merged provider/resource tags if any tags are configured; failures after successful registration are warned and retried on later applies instead of orphaning the paid domain
+4. `UpdateDomainNameservers` if specified; failures after successful registration are warned and retried on later applies
 5. `GetDomainDetail` to fetch computed fields
 6. If `delete_hosted_zone = true`: safely delete the registrar-created zone
 7. Otherwise: `ListHostedZonesByName` to get hosted zone ID
@@ -221,12 +223,12 @@ Provider creates two clients via `providerData`:
 
 1. `GetDomainDetail` API call
 2. If error, removes resource from state (known issue - should distinguish 404)
-3. `ListTagsForDomain` to refresh `tags` and `tags_all`
+3. `ListTagsForDomain` to refresh `tags` and `tags_all` only when tags are configured or already tracked in state
 4. `ListHostedZonesByName` to refresh hosted zone ID
 
 ### Update
 
-1. `ListTagsForDomain`, then `UpdateTagsForDomain` / `DeleteTagsForDomain` to reconcile tags
+1. If tags are configured or already tracked, `ListTagsForDomain`, then `UpdateTagsForDomain` / `DeleteTagsForDomain` to reconcile tags
 2. `EnableDomainAutoRenew` / `DisableDomainAutoRenew` if changed
 3. `UpdateDomainNameservers` if changed
 4. `UpdateDomainContact` for contact changes
@@ -280,9 +282,6 @@ Uses `ImportStatePassthroughID` setting both `domain_name` and `id`.
         "route53domains:EnableDomainAutoRenew",
         "route53domains:DisableDomainAutoRenew",
         "route53domains:DeleteDomain",
-        "route53domains:ListTagsForDomain",
-        "route53domains:UpdateTagsForDomain",
-        "route53domains:DeleteTagsForDomain",
         "route53domains:CheckDomainAvailability",
         "route53domains:ListPrices",
         "route53:ListHostedZonesByName",
@@ -294,6 +293,8 @@ Uses `ImportStatePassthroughID` setting both `domain_name` and `id`.
   ]
 }
 ```
+
+Add `route53domains:ListTagsForDomain`, `route53domains:UpdateTagsForDomain`, and `route53domains:DeleteTagsForDomain` when using provider `default_tags`, resource `tags`, or managing resources that already have tracked tags in state.
 
 ## Testing
 

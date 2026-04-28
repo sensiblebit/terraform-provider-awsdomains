@@ -2,15 +2,29 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"maps"
+	"regexp"
+	"slices"
 	"sort"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	route53domainTypes "github.com/aws/aws-sdk-go-v2/service/route53domains/types"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	tftypes "github.com/hashicorp/terraform-plugin-framework/types"
 )
+
+const (
+	maxDomainTags      = 50
+	maxDomainTagKeyLen = 128
+	maxDomainTagValLen = 256
+)
+
+var domainTagPattern = regexp.MustCompile(`^[A-Za-z0-9 .:/=+\-@]*$`)
 
 func emptyFrameworkStringMap() tftypes.Map {
 	return tftypes.MapValueMust(tftypes.StringType, map[string]attr.Value{})
@@ -43,6 +57,13 @@ func frameworkMapElementsKnown(value tftypes.Map) bool {
 	return true
 }
 
+func frameworkMapHasElements(value tftypes.Map) bool {
+	if value.IsNull() || value.IsUnknown() {
+		return false
+	}
+	return len(value.Elements()) > 0
+}
+
 func stringMapToFrameworkMap(tags map[string]string) (tftypes.Map, diag.Diagnostics) {
 	values := make(map[string]attr.Value, len(tags))
 	for key, value := range tags {
@@ -62,6 +83,60 @@ func mergeTags(defaultTags, resourceTags map[string]string) map[string]string {
 	merged := cloneTags(defaultTags)
 	maps.Copy(merged, resourceTags)
 	return merged
+}
+
+func tagManagementEnabled(defaultTags map[string]string, tagMaps ...tftypes.Map) bool {
+	if len(defaultTags) > 0 {
+		return true
+	}
+
+	return slices.ContainsFunc(tagMaps, frameworkMapHasElements)
+}
+
+func validateDomainTags(tags map[string]string) []string {
+	var problems []string
+	if len(tags) > maxDomainTags {
+		problems = append(problems, fmt.Sprintf("tag count %d exceeds the Route53 Domains limit of %d", len(tags), maxDomainTags))
+	}
+
+	for key, value := range tags {
+		keyLen := utf8.RuneCountInString(key)
+		valueLen := utf8.RuneCountInString(value)
+
+		switch {
+		case keyLen == 0:
+			problems = append(problems, "tag keys must be at least 1 character long")
+		case keyLen > maxDomainTagKeyLen:
+			problems = append(problems, fmt.Sprintf("tag key %q is %d characters; maximum is %d", key, keyLen, maxDomainTagKeyLen))
+		}
+
+		if valueLen > maxDomainTagValLen {
+			problems = append(problems, fmt.Sprintf("tag value for key %q is %d characters; maximum is %d", key, valueLen, maxDomainTagValLen))
+		}
+
+		if !domainTagPattern.MatchString(key) {
+			problems = append(problems, fmt.Sprintf("tag key %q contains invalid characters; allowed characters are letters, numbers, spaces, and .:/=+-@", key))
+		}
+		if !domainTagPattern.MatchString(value) {
+			problems = append(problems, fmt.Sprintf("tag value for key %q contains invalid characters; allowed characters are letters, numbers, spaces, and .:/=+-@", key))
+		}
+	}
+
+	sort.Strings(problems)
+	return problems
+}
+
+func addTagValidationDiagnostics(diags *diag.Diagnostics, attributePath path.Path, tags map[string]string) {
+	problems := validateDomainTags(tags)
+	if len(problems) == 0 {
+		return
+	}
+
+	diags.AddAttributeError(
+		attributePath,
+		"Invalid Route53 Domains Tags",
+		strings.Join(problems, "\n"),
+	)
 }
 
 func awsTagsToStringMap(tags []route53domainTypes.Tag) map[string]string {

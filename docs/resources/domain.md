@@ -180,7 +180,7 @@ resource "awsdomains_domain" "example" {
 - `registrant_privacy` (Boolean) Enable WHOIS privacy for registrant contact. Defaults to `true`.
 - `tech_privacy` (Boolean) Enable WHOIS privacy for tech contact. Defaults to `true`.
 - `nameservers` (List of String) Custom nameservers for the domain.
-- `tags` (Map of String) Resource-level tags for the domain. These override provider `default_tags` with the same key.
+- `tags` (Map of String) Resource-level tags for the domain. These override provider `default_tags` with the same key. Route53 Domains allows up to 50 merged tags; keys must be 1-128 characters, values must be 0-256 characters, and both may contain only letters, numbers, spaces, and `. : / = + - @`.
 - `allow_delete` (Boolean) Allow actual domain deletion on `terraform destroy`. Defaults to `false`.
 - `delete_hosted_zone` (Boolean) Delete the auto-created Route53 hosted zone after registration. Use when pointing to external DNS. Only deletes if zone is public, has registrar comment, and contains only NS/SOA records. Defaults to `false`.
 - `registration_timeout` (Number) Timeout in seconds for domain registration. Defaults to `900`.

@@ -29,6 +29,7 @@ import (
 var _ resource.Resource = &DomainRegistrationResource{}
 var _ resource.ResourceWithImportState = &DomainRegistrationResource{}
 var _ resource.ResourceWithModifyPlan = &DomainRegistrationResource{}
+var _ resource.ResourceWithValidateConfig = &DomainRegistrationResource{}
 
 // DomainRegistrationResource manages Route53 Domains registrations.
 type DomainRegistrationResource struct {
@@ -285,6 +286,29 @@ func (r *DomainRegistrationResource) Schema(_ context.Context, _ resource.Schema
 	}
 }
 
+// ValidateConfig validates resource configuration before planning or applying changes.
+func (r *DomainRegistrationResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var data DomainRegistrationResourceModel
+
+	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	validateNameserversConfig(&resp.Diagnostics, data.Nameservers)
+
+	if !frameworkMapElementsKnown(data.Tags) {
+		return
+	}
+
+	resourceTags, diags := frameworkMapToStringMap(ctx, data.Tags)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	addTagValidationDiagnostics(&resp.Diagnostics, path.Root("tags"), resourceTags)
+}
+
 // Configure loads shared provider clients into the resource.
 func (r *DomainRegistrationResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
@@ -333,6 +357,67 @@ func contactModelToAWS(m *ContactModel) *types.ContactDetail {
 	}
 
 	return contact
+}
+
+func awsStringValue(value *string) tftypes.String {
+	if value == nil {
+		return tftypes.StringNull()
+	}
+	return tftypes.StringValue(*value)
+}
+
+func awsOptionalStringValue(value *string, prior tftypes.String) tftypes.String {
+	if value == nil {
+		return tftypes.StringNull()
+	}
+	if prior.IsNull() && *value == "" {
+		return tftypes.StringNull()
+	}
+	return tftypes.StringValue(*value)
+}
+
+func awsContactTypeValue(value types.ContactType, prior tftypes.String) tftypes.String {
+	if value == "" {
+		return tftypes.StringNull()
+	}
+	if prior.IsNull() && value == types.ContactTypePerson {
+		return tftypes.StringNull()
+	}
+	return tftypes.StringValue(string(value))
+}
+
+func awsCountryCodeValue(value types.CountryCode) tftypes.String {
+	if value == "" {
+		return tftypes.StringNull()
+	}
+	return tftypes.StringValue(string(value))
+}
+
+func awsContactToModel(contact *types.ContactDetail, prior *ContactModel) *ContactModel {
+	if contact == nil {
+		return prior
+	}
+
+	priorAddressLine2 := tftypes.StringNull()
+	priorContactType := tftypes.StringNull()
+	if prior != nil {
+		priorAddressLine2 = prior.AddressLine2
+		priorContactType = prior.ContactType
+	}
+
+	return &ContactModel{
+		FirstName:    awsStringValue(contact.FirstName),
+		LastName:     awsStringValue(contact.LastName),
+		Email:        awsStringValue(contact.Email),
+		PhoneNumber:  awsStringValue(contact.PhoneNumber),
+		AddressLine1: awsStringValue(contact.AddressLine1),
+		AddressLine2: awsOptionalStringValue(contact.AddressLine2, priorAddressLine2),
+		City:         awsStringValue(contact.City),
+		State:        awsStringValue(contact.State),
+		ZipCode:      awsStringValue(contact.ZipCode),
+		CountryCode:  awsCountryCodeValue(contact.CountryCode),
+		ContactType:  awsContactTypeValue(contact.ContactType, priorContactType),
+	}
 }
 
 func contactModelsEqual(a, b *ContactModel) bool {
@@ -388,6 +473,84 @@ func frameworkListToAWSNameservers(ctx context.Context, value tftypes.List) ([]t
 
 func stringSliceToFrameworkList(ctx context.Context, values []string) (tftypes.List, diag.Diagnostics) {
 	return tftypes.ListValueFrom(ctx, tftypes.StringType, values)
+}
+
+func validateNameserversConfig(diags *diag.Diagnostics, value tftypes.List) {
+	if value.IsNull() || value.IsUnknown() {
+		return
+	}
+	if len(value.Elements()) > 0 {
+		return
+	}
+
+	diags.AddAttributeError(
+		path.Root("nameservers"),
+		"Invalid Nameservers Configuration",
+		"Set nameservers to at least one hostname or omit the attribute. Clearing nameservers is not supported by Route53 Domains and would leave Terraform state inconsistent with AWS.",
+	)
+}
+
+func nameserversRemoved(plan, state tftypes.List) bool {
+	if plan.IsUnknown() || state.IsNull() || state.IsUnknown() || len(state.Elements()) == 0 {
+		return false
+	}
+	if plan.IsNull() {
+		return true
+	}
+	return len(plan.Elements()) == 0
+}
+
+func (r *DomainRegistrationResource) populateDomainDetailState(ctx context.Context, data *DomainRegistrationResourceModel, domainDetail *route53domains.GetDomainDetailOutput) diag.Diagnostics {
+	var diags diag.Diagnostics
+
+	domainName := data.DomainName.ValueString()
+	if domainDetail.DomainName != nil {
+		domainName = aws.ToString(domainDetail.DomainName)
+		data.DomainName = tftypes.StringValue(domainName)
+	}
+	data.ID = tftypes.StringValue(domainName)
+
+	if domainDetail.AutoRenew != nil {
+		data.AutoRenew = tftypes.BoolValue(*domainDetail.AutoRenew)
+	}
+	if domainDetail.ExpirationDate != nil {
+		data.ExpirationDate = tftypes.StringValue(domainDetail.ExpirationDate.Format(time.RFC3339))
+	}
+	if domainDetail.CreationDate != nil {
+		data.CreationDate = tftypes.StringValue(domainDetail.CreationDate.Format(time.RFC3339))
+	}
+	if len(domainDetail.StatusList) > 0 {
+		data.Status = tftypes.StringValue(domainDetail.StatusList[0])
+	}
+
+	data.AdminContact = awsContactToModel(domainDetail.AdminContact, data.AdminContact)
+	data.RegistrantContact = awsContactToModel(domainDetail.RegistrantContact, data.RegistrantContact)
+	data.TechContact = awsContactToModel(domainDetail.TechContact, data.TechContact)
+
+	if domainDetail.AdminPrivacy != nil {
+		data.AdminPrivacy = tftypes.BoolValue(*domainDetail.AdminPrivacy)
+	}
+	if domainDetail.RegistrantPrivacy != nil {
+		data.RegistrantPrivacy = tftypes.BoolValue(*domainDetail.RegistrantPrivacy)
+	}
+	if domainDetail.TechPrivacy != nil {
+		data.TechPrivacy = tftypes.BoolValue(*domainDetail.TechPrivacy)
+	}
+
+	if len(domainDetail.Nameservers) > 0 {
+		nameservers := make([]string, 0, len(domainDetail.Nameservers))
+		for _, ns := range domainDetail.Nameservers {
+			nameservers = append(nameservers, aws.ToString(ns.Name))
+		}
+		nameserversList, nameserverDiags := stringSliceToFrameworkList(ctx, nameservers)
+		diags.Append(nameserverDiags...)
+		if diags.HasError() {
+			return diags
+		}
+		data.Nameservers = nameserversList
+	}
+
+	return diags
 }
 
 func isExactHostedZoneName(zoneName, domainName string) bool {
@@ -573,7 +736,13 @@ func (r *DomainRegistrationResource) ModifyPlan(ctx context.Context, req resourc
 		return
 	}
 
-	tagsAll, diags := stringMapToFrameworkMap(mergeTags(r.defaultTags, resourceTags))
+	mergedTags := mergeTags(r.defaultTags, resourceTags)
+	addTagValidationDiagnostics(&resp.Diagnostics, path.Root("tags_all"), mergedTags)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	tagsAll, diags := stringMapToFrameworkMap(mergedTags)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -648,6 +817,11 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 		return
 	}
 	desiredTags := mergeTags(r.defaultTags, resourceTags)
+	addTagValidationDiagnostics(&resp.Diagnostics, path.Root("tags_all"), desiredTags)
+	validateNameserversConfig(&resp.Diagnostics, data.Nameservers)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 
 	// Build registration request
 	registerInput := &route53domains.RegisterDomainInput{
@@ -719,13 +893,18 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 		time.Sleep(10 * time.Second)
 	}
 
-	err = r.syncDomainTags(ctx, domainName, map[string]string{}, desiredTags)
-	if err != nil {
-		resp.Diagnostics.AddError(
-			"Error updating domain tags",
-			fmt.Sprintf("Could not update tags for %s: %s", domainName, err.Error()),
-		)
-		return
+	tagsAllSource := desiredTags
+	if len(desiredTags) > 0 {
+		err = r.syncDomainTags(ctx, domainName, map[string]string{}, desiredTags)
+		if err != nil {
+			resp.Diagnostics.AddWarning(
+				"Domain Registered Without Tags",
+				fmt.Sprintf("The domain %s was registered, but tags could not be updated: %s. The resource will remain in Terraform state so a later apply can retry tag reconciliation.", domainName, err.Error()),
+			)
+			if remoteTags, listErr := r.listDomainTags(ctx, domainName); listErr == nil {
+				tagsAllSource = remoteTags
+			}
+		}
 	}
 
 	nameservers, diags := frameworkListToAWSNameservers(ctx, data.Nameservers)
@@ -739,11 +918,10 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 			Nameservers: nameservers,
 		})
 		if err != nil {
-			resp.Diagnostics.AddError(
-				"Error updating nameservers",
-				fmt.Sprintf("Could not update nameservers for %s: %s", domainName, err.Error()),
+			resp.Diagnostics.AddWarning(
+				"Domain Registered Without Nameserver Update",
+				fmt.Sprintf("The domain %s was registered, but nameservers could not be updated: %s. The resource will remain in Terraform state so a later apply can retry nameserver reconciliation.", domainName, err.Error()),
 			)
-			return
 		}
 	}
 
@@ -760,17 +938,11 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 	}
 
 	// Update state
-	data.ID = tftypes.StringValue(domainName)
-	if domainDetail.ExpirationDate != nil {
-		data.ExpirationDate = tftypes.StringValue(domainDetail.ExpirationDate.Format(time.RFC3339))
+	resp.Diagnostics.Append(r.populateDomainDetailState(ctx, &data, domainDetail)...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
-	if domainDetail.CreationDate != nil {
-		data.CreationDate = tftypes.StringValue(domainDetail.CreationDate.Format(time.RFC3339))
-	}
-	if len(domainDetail.StatusList) > 0 {
-		data.Status = tftypes.StringValue(domainDetail.StatusList[0])
-	}
-	tagsAll, diags := stringMapToFrameworkMap(desiredTags)
+	tagsAll, diags := stringMapToFrameworkMap(tagsAllSource)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -835,60 +1007,41 @@ func (r *DomainRegistrationResource) Read(ctx context.Context, req resource.Read
 		return
 	}
 
-	// Update computed fields
-	data.ID = tftypes.StringValue(domainName)
-	if domainDetail.AutoRenew != nil {
-		data.AutoRenew = tftypes.BoolValue(*domainDetail.AutoRenew)
-	}
-	if domainDetail.ExpirationDate != nil {
-		data.ExpirationDate = tftypes.StringValue(domainDetail.ExpirationDate.Format(time.RFC3339))
-	}
-	if domainDetail.CreationDate != nil {
-		data.CreationDate = tftypes.StringValue(domainDetail.CreationDate.Format(time.RFC3339))
-	}
-	if len(domainDetail.StatusList) > 0 {
-		data.Status = tftypes.StringValue(domainDetail.StatusList[0])
+	resp.Diagnostics.Append(r.populateDomainDetailState(ctx, &data, domainDetail)...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
-	// Update nameservers from AWS
-	if len(domainDetail.Nameservers) > 0 {
-		nameservers := make([]string, 0, len(domainDetail.Nameservers))
-		for _, ns := range domainDetail.Nameservers {
-			nameservers = append(nameservers, aws.ToString(ns.Name))
+	if tagManagementEnabled(r.defaultTags, data.Tags, data.TagsAll) {
+		remoteTags, err := r.listDomainTags(ctx, domainName)
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Error reading domain tags",
+				fmt.Sprintf("Could not read tags for %s: %s", domainName, err.Error()),
+			)
+			return
 		}
-		nameserversList, diags := stringSliceToFrameworkList(ctx, nameservers)
+
+		priorResourceTags, diags := frameworkMapToStringMap(ctx, data.Tags)
 		resp.Diagnostics.Append(diags...)
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		data.Nameservers = nameserversList
-	}
 
-	remoteTags, err := r.listDomainTags(ctx, domainName)
-	if err != nil {
-		resp.Diagnostics.AddError(
-			"Error reading domain tags",
-			fmt.Sprintf("Could not read tags for %s: %s", domainName, err.Error()),
-		)
-		return
-	}
+		data.Tags, diags = stringMapToFrameworkMap(resourceTagsFromRemote(remoteTags, priorResourceTags))
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
 
-	priorResourceTags, diags := frameworkMapToStringMap(ctx, data.Tags)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	data.Tags, diags = stringMapToFrameworkMap(resourceTagsFromRemote(remoteTags, priorResourceTags))
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	data.TagsAll, diags = stringMapToFrameworkMap(remoteTags)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
+		data.TagsAll, diags = stringMapToFrameworkMap(remoteTags)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	} else {
+		data.Tags = emptyFrameworkStringMap()
+		data.TagsAll = emptyFrameworkStringMap()
 	}
 
 	// Refresh hosted zone ID
@@ -915,29 +1068,47 @@ func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.Up
 
 	domainName := data.DomainName.ValueString()
 
+	validateNameserversConfig(&resp.Diagnostics, data.Nameservers)
+	if nameserversRemoved(data.Nameservers, state.Nameservers) {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("nameservers"),
+			"Cannot Clear Nameservers",
+			"Route53 Domains does not support clearing nameservers through this provider. Set a replacement list of nameservers instead of removing the attribute.",
+		)
+	}
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	resourceTags, diags := frameworkMapToStringMap(ctx, data.Tags)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	desiredTags := mergeTags(r.defaultTags, resourceTags)
-
-	currentTags, err := r.listDomainTags(ctx, domainName)
-	if err != nil {
-		resp.Diagnostics.AddError(
-			"Error reading domain tags",
-			fmt.Sprintf("Could not read tags for %s: %s", domainName, err.Error()),
-		)
+	addTagValidationDiagnostics(&resp.Diagnostics, path.Root("tags_all"), desiredTags)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	err = r.syncDomainTags(ctx, domainName, currentTags, desiredTags)
-	if err != nil {
-		resp.Diagnostics.AddError(
-			"Error updating domain tags",
-			fmt.Sprintf("Could not update tags for %s: %s", domainName, err.Error()),
-		)
-		return
+	if tagManagementEnabled(r.defaultTags, data.Tags, state.Tags, state.TagsAll) {
+		currentTags, err := r.listDomainTags(ctx, domainName)
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Error reading domain tags",
+				fmt.Sprintf("Could not read tags for %s: %s", domainName, err.Error()),
+			)
+			return
+		}
+
+		err = r.syncDomainTags(ctx, domainName, currentTags, desiredTags)
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Error updating domain tags",
+				fmt.Sprintf("Could not update tags for %s: %s", domainName, err.Error()),
+			)
+			return
+		}
 	}
 
 	// Update auto-renew if changed
@@ -989,7 +1160,7 @@ func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.Up
 	}
 
 	if !domainContactsEqual(data, state) {
-		_, err = r.client.UpdateDomainContact(ctx, &route53domains.UpdateDomainContactInput{
+		_, err := r.client.UpdateDomainContact(ctx, &route53domains.UpdateDomainContactInput{
 			DomainName:        aws.String(domainName),
 			AdminContact:      contactModelToAWS(data.AdminContact),
 			RegistrantContact: contactModelToAWS(data.RegistrantContact),
@@ -1005,7 +1176,7 @@ func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.Up
 	}
 
 	if !domainPrivacySettingsEqual(data, state) {
-		_, err = r.client.UpdateDomainContactPrivacy(ctx, &route53domains.UpdateDomainContactPrivacyInput{
+		_, err := r.client.UpdateDomainContactPrivacy(ctx, &route53domains.UpdateDomainContactPrivacyInput{
 			DomainName:        aws.String(domainName),
 			AdminPrivacy:      aws.Bool(data.AdminPrivacy.ValueBool()),
 			RegistrantPrivacy: aws.Bool(data.RegistrantPrivacy.ValueBool()),
@@ -1032,16 +1203,11 @@ func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.Up
 		return
 	}
 
-	data.ID = tftypes.StringValue(domainName)
-	if domainDetail.ExpirationDate != nil {
-		data.ExpirationDate = tftypes.StringValue(domainDetail.ExpirationDate.Format(time.RFC3339))
+	resp.Diagnostics.Append(r.populateDomainDetailState(ctx, &data, domainDetail)...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
-	if domainDetail.CreationDate != nil {
-		data.CreationDate = tftypes.StringValue(domainDetail.CreationDate.Format(time.RFC3339))
-	}
-	if len(domainDetail.StatusList) > 0 {
-		data.Status = tftypes.StringValue(domainDetail.StatusList[0])
-	}
+
 	data.TagsAll, diags = stringMapToFrameworkMap(desiredTags)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {

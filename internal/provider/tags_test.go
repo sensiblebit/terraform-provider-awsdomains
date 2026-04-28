@@ -53,6 +53,32 @@ func TestTagDiff(t *testing.T) {
 	}
 }
 
+func TestValidateDomainTagsRejectsRoute53DomainsInvalidTags(t *testing.T) {
+	tags := map[string]string{
+		"":          "empty-key",
+		"Bad#Key":   "value",
+		"GoodKey":   "Bad#Value",
+		"LongValue": string(make([]byte, maxDomainTagValLen+1)),
+	}
+
+	problems := validateDomainTags(tags)
+	if len(problems) == 0 {
+		t.Fatal("validateDomainTags returned no problems for invalid tags")
+	}
+}
+
+func TestValidateDomainTagsRejectsTooManyTags(t *testing.T) {
+	tags := make(map[string]string, maxDomainTags+1)
+	for i := range maxDomainTags + 1 {
+		tags[string(rune('a'+i))] = "value"
+	}
+
+	problems := validateDomainTags(tags)
+	if len(problems) == 0 {
+		t.Fatal("validateDomainTags returned no problems for too many tags")
+	}
+}
+
 func TestResourceTagsFromRemoteKeepsPriorResourceOverrides(t *testing.T) {
 	remoteTags := map[string]string{
 		"Environment": "shared",

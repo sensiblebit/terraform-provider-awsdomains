@@ -14,16 +14,26 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/route53domains"
 	"github.com/aws/aws-sdk-go-v2/service/route53domains/types"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	tftypes "github.com/hashicorp/terraform-plugin-framework/types"
 )
 
 // MockRoute53DomainsClient is a mock implementation for testing
 type MockRoute53DomainsClient struct {
-	GetDomainDetailFunc         func(ctx context.Context, params *route53domains.GetDomainDetailInput, optFns ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error)
-	RegisterDomainFunc          func(ctx context.Context, params *route53domains.RegisterDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.RegisterDomainOutput, error)
-	GetOperationDetailFunc      func(ctx context.Context, params *route53domains.GetOperationDetailInput, optFns ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error)
-	UpdateDomainNameserversFunc func(ctx context.Context, params *route53domains.UpdateDomainNameserversInput, optFns ...func(*route53domains.Options)) (*route53domains.UpdateDomainNameserversOutput, error)
-	CheckDomainAvailabilityFunc func(ctx context.Context, params *route53domains.CheckDomainAvailabilityInput, optFns ...func(*route53domains.Options)) (*route53domains.CheckDomainAvailabilityOutput, error)
+	GetDomainDetailFunc            func(ctx context.Context, params *route53domains.GetDomainDetailInput, optFns ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error)
+	RegisterDomainFunc             func(ctx context.Context, params *route53domains.RegisterDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.RegisterDomainOutput, error)
+	GetOperationDetailFunc         func(ctx context.Context, params *route53domains.GetOperationDetailInput, optFns ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error)
+	UpdateDomainNameserversFunc    func(ctx context.Context, params *route53domains.UpdateDomainNameserversInput, optFns ...func(*route53domains.Options)) (*route53domains.UpdateDomainNameserversOutput, error)
+	EnableDomainAutoRenewFunc      func(ctx context.Context, params *route53domains.EnableDomainAutoRenewInput, optFns ...func(*route53domains.Options)) (*route53domains.EnableDomainAutoRenewOutput, error)
+	DisableDomainAutoRenewFunc     func(ctx context.Context, params *route53domains.DisableDomainAutoRenewInput, optFns ...func(*route53domains.Options)) (*route53domains.DisableDomainAutoRenewOutput, error)
+	UpdateDomainContactFunc        func(ctx context.Context, params *route53domains.UpdateDomainContactInput, optFns ...func(*route53domains.Options)) (*route53domains.UpdateDomainContactOutput, error)
+	UpdateDomainContactPrivacyFunc func(ctx context.Context, params *route53domains.UpdateDomainContactPrivacyInput, optFns ...func(*route53domains.Options)) (*route53domains.UpdateDomainContactPrivacyOutput, error)
+	DeleteDomainFunc               func(ctx context.Context, params *route53domains.DeleteDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.DeleteDomainOutput, error)
+	ListTagsForDomainFunc          func(ctx context.Context, params *route53domains.ListTagsForDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.ListTagsForDomainOutput, error)
+	UpdateTagsForDomainFunc        func(ctx context.Context, params *route53domains.UpdateTagsForDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.UpdateTagsForDomainOutput, error)
+	DeleteTagsForDomainFunc        func(ctx context.Context, params *route53domains.DeleteTagsForDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.DeleteTagsForDomainOutput, error)
+	CheckDomainAvailabilityFunc    func(ctx context.Context, params *route53domains.CheckDomainAvailabilityInput, optFns ...func(*route53domains.Options)) (*route53domains.CheckDomainAvailabilityOutput, error)
 }
 
 type MockRoute53Client struct {
@@ -37,7 +47,93 @@ var (
 	errListResourceRecordSetsFuncNotConfigured = errors.New("ListResourceRecordSetsFunc not configured")
 	errDeleteHostedZoneFuncNotConfigured       = errors.New("DeleteHostedZoneFunc not configured")
 	errUnexpectedMockRoute53Call               = errors.New("unexpected Route53 mock call")
+	errUnexpectedMockRoute53DomainsCall        = errors.New("unexpected Route53 Domains mock call")
+	errMockAccessDenied                        = errors.New("access denied")
 )
+
+func (m *MockRoute53DomainsClient) GetDomainDetail(ctx context.Context, params *route53domains.GetDomainDetailInput, optFns ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+	if m.GetDomainDetailFunc == nil {
+		return nil, errUnexpectedMockRoute53DomainsCall
+	}
+	return m.GetDomainDetailFunc(ctx, params, optFns...)
+}
+
+func (m *MockRoute53DomainsClient) RegisterDomain(ctx context.Context, params *route53domains.RegisterDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.RegisterDomainOutput, error) {
+	if m.RegisterDomainFunc == nil {
+		return nil, errUnexpectedMockRoute53DomainsCall
+	}
+	return m.RegisterDomainFunc(ctx, params, optFns...)
+}
+
+func (m *MockRoute53DomainsClient) GetOperationDetail(ctx context.Context, params *route53domains.GetOperationDetailInput, optFns ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error) {
+	if m.GetOperationDetailFunc == nil {
+		return nil, errUnexpectedMockRoute53DomainsCall
+	}
+	return m.GetOperationDetailFunc(ctx, params, optFns...)
+}
+
+func (m *MockRoute53DomainsClient) UpdateDomainNameservers(ctx context.Context, params *route53domains.UpdateDomainNameserversInput, optFns ...func(*route53domains.Options)) (*route53domains.UpdateDomainNameserversOutput, error) {
+	if m.UpdateDomainNameserversFunc == nil {
+		return nil, errUnexpectedMockRoute53DomainsCall
+	}
+	return m.UpdateDomainNameserversFunc(ctx, params, optFns...)
+}
+
+func (m *MockRoute53DomainsClient) EnableDomainAutoRenew(ctx context.Context, params *route53domains.EnableDomainAutoRenewInput, optFns ...func(*route53domains.Options)) (*route53domains.EnableDomainAutoRenewOutput, error) {
+	if m.EnableDomainAutoRenewFunc == nil {
+		return nil, errUnexpectedMockRoute53DomainsCall
+	}
+	return m.EnableDomainAutoRenewFunc(ctx, params, optFns...)
+}
+
+func (m *MockRoute53DomainsClient) DisableDomainAutoRenew(ctx context.Context, params *route53domains.DisableDomainAutoRenewInput, optFns ...func(*route53domains.Options)) (*route53domains.DisableDomainAutoRenewOutput, error) {
+	if m.DisableDomainAutoRenewFunc == nil {
+		return nil, errUnexpectedMockRoute53DomainsCall
+	}
+	return m.DisableDomainAutoRenewFunc(ctx, params, optFns...)
+}
+
+func (m *MockRoute53DomainsClient) UpdateDomainContact(ctx context.Context, params *route53domains.UpdateDomainContactInput, optFns ...func(*route53domains.Options)) (*route53domains.UpdateDomainContactOutput, error) {
+	if m.UpdateDomainContactFunc == nil {
+		return nil, errUnexpectedMockRoute53DomainsCall
+	}
+	return m.UpdateDomainContactFunc(ctx, params, optFns...)
+}
+
+func (m *MockRoute53DomainsClient) UpdateDomainContactPrivacy(ctx context.Context, params *route53domains.UpdateDomainContactPrivacyInput, optFns ...func(*route53domains.Options)) (*route53domains.UpdateDomainContactPrivacyOutput, error) {
+	if m.UpdateDomainContactPrivacyFunc == nil {
+		return nil, errUnexpectedMockRoute53DomainsCall
+	}
+	return m.UpdateDomainContactPrivacyFunc(ctx, params, optFns...)
+}
+
+func (m *MockRoute53DomainsClient) DeleteDomain(ctx context.Context, params *route53domains.DeleteDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.DeleteDomainOutput, error) {
+	if m.DeleteDomainFunc == nil {
+		return nil, errUnexpectedMockRoute53DomainsCall
+	}
+	return m.DeleteDomainFunc(ctx, params, optFns...)
+}
+
+func (m *MockRoute53DomainsClient) ListTagsForDomain(ctx context.Context, params *route53domains.ListTagsForDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.ListTagsForDomainOutput, error) {
+	if m.ListTagsForDomainFunc == nil {
+		return nil, errUnexpectedMockRoute53DomainsCall
+	}
+	return m.ListTagsForDomainFunc(ctx, params, optFns...)
+}
+
+func (m *MockRoute53DomainsClient) UpdateTagsForDomain(ctx context.Context, params *route53domains.UpdateTagsForDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.UpdateTagsForDomainOutput, error) {
+	if m.UpdateTagsForDomainFunc == nil {
+		return nil, errUnexpectedMockRoute53DomainsCall
+	}
+	return m.UpdateTagsForDomainFunc(ctx, params, optFns...)
+}
+
+func (m *MockRoute53DomainsClient) DeleteTagsForDomain(ctx context.Context, params *route53domains.DeleteTagsForDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.DeleteTagsForDomainOutput, error) {
+	if m.DeleteTagsForDomainFunc == nil {
+		return nil, errUnexpectedMockRoute53DomainsCall
+	}
+	return m.DeleteTagsForDomainFunc(ctx, params, optFns...)
+}
 
 func (m *MockRoute53Client) ListHostedZonesByName(ctx context.Context, params *route53.ListHostedZonesByNameInput, optFns ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error) {
 	if m.ListHostedZonesByNameFunc == nil {
@@ -308,6 +404,216 @@ func TestDomainPrivacySettingsEqualDetectsPrivacyChange(t *testing.T) {
 	}
 }
 
+func TestUpdateTagOnlySkipsUnchangedDomainMutations(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "tagless.example.com")
+	state.Tags = stringMapValue(t, map[string]string{"Environment": "dev"})
+	state.TagsAll = stringMapValue(t, map[string]string{"Environment": "dev"})
+
+	plan := state
+	plan.Tags = stringMapValue(t, map[string]string{"Environment": "prod"})
+	plan.TagsAll = stringMapValue(t, map[string]string{"Environment": "prod"})
+
+	updateTagsCalled := false
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			ListTagsForDomainFunc: func(_ context.Context, _ *route53domains.ListTagsForDomainInput, _ ...func(*route53domains.Options)) (*route53domains.ListTagsForDomainOutput, error) {
+				return &route53domains.ListTagsForDomainOutput{
+					TagList: []types.Tag{{Key: aws.String("Environment"), Value: aws.String("dev")}},
+				}, nil
+			},
+			UpdateTagsForDomainFunc: func(_ context.Context, params *route53domains.UpdateTagsForDomainInput, _ ...func(*route53domains.Options)) (*route53domains.UpdateTagsForDomainOutput, error) {
+				updateTagsCalled = true
+				if len(params.TagsToUpdate) != 1 {
+					t.Fatalf("TagsToUpdate count = %d, want 1", len(params.TagsToUpdate))
+				}
+				if got := aws.ToString(params.TagsToUpdate[0].Value); got != "prod" {
+					t.Fatalf("updated tag value = %q, want %q", got, "prod")
+				}
+				return &route53domains.UpdateTagsForDomainOutput{}, nil
+			},
+			UpdateDomainNameserversFunc: func(context.Context, *route53domains.UpdateDomainNameserversInput, ...func(*route53domains.Options)) (*route53domains.UpdateDomainNameserversOutput, error) {
+				t.Fatal("UpdateDomainNameservers must not be called for tag-only update")
+				return nil, errUnexpectedMockRoute53DomainsCall
+			},
+			UpdateDomainContactFunc: func(context.Context, *route53domains.UpdateDomainContactInput, ...func(*route53domains.Options)) (*route53domains.UpdateDomainContactOutput, error) {
+				t.Fatal("UpdateDomainContact must not be called for tag-only update")
+				return nil, errUnexpectedMockRoute53DomainsCall
+			},
+			UpdateDomainContactPrivacyFunc: func(context.Context, *route53domains.UpdateDomainContactPrivacyInput, ...func(*route53domains.Options)) (*route53domains.UpdateDomainContactPrivacyOutput, error) {
+				t.Fatal("UpdateDomainContactPrivacy must not be called for tag-only update")
+				return nil, errUnexpectedMockRoute53DomainsCall
+			},
+			GetDomainDetailFunc: func(_ context.Context, _ *route53domains.GetDomainDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				return MockDomainDetailResponse("tagless.example.com"), nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceUpdateRequest(t, schema, plan, state)
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Update(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update returned diagnostics: %v", resp.Diagnostics)
+	}
+	if !updateTagsCalled {
+		t.Fatal("UpdateTagsForDomain was not called")
+	}
+}
+
+func TestUpdateRejectsNameserverRemoval(t *testing.T) {
+	state := testDomainModel(t, "example.com")
+	plan := state
+	plan.Nameservers = tftypes.ListNull(tftypes.StringType)
+
+	schema := testDomainResourceSchema(t)
+	req := resourceUpdateRequest(t, schema, plan, state)
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource := &DomainRegistrationResource{client: &MockRoute53DomainsClient{}}
+	domainResource.Update(context.Background(), req, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected nameserver removal to return an error")
+	}
+}
+
+func TestReadSkipsTagAPIWhenTagsUnmanaged(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	state.Tags = emptyFrameworkStringMap()
+	state.TagsAll = emptyFrameworkStringMap()
+
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			GetDomainDetailFunc: func(_ context.Context, _ *route53domains.GetDomainDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				return MockDomainDetailResponse("example.com"), nil
+			},
+			ListTagsForDomainFunc: func(context.Context, *route53domains.ListTagsForDomainInput, ...func(*route53domains.Options)) (*route53domains.ListTagsForDomainOutput, error) {
+				t.Fatal("ListTagsForDomain must not be called when tags are unmanaged")
+				return nil, errUnexpectedMockRoute53DomainsCall
+			},
+		},
+		route53Client: &MockRoute53Client{
+			ListHostedZonesByNameFunc: func(context.Context, *route53.ListHostedZonesByNameInput, ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error) {
+				return &route53.ListHostedZonesByNameOutput{}, nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceReadRequest(t, schema, state)
+	resp := &resource.ReadResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Read(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read returned diagnostics: %v", resp.Diagnostics)
+	}
+}
+
+func TestReadHydratesContactAndPrivacyDrift(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	state.AdminContact.Email = stringValue("old-admin@example.com")
+
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			GetDomainDetailFunc: func(_ context.Context, _ *route53domains.GetDomainDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				detail := MockDomainDetailResponse("example.com")
+				detail.AdminContact.Email = aws.String("new-admin@example.com")
+				detail.AdminPrivacy = aws.Bool(false)
+				return detail, nil
+			},
+		},
+		route53Client: &MockRoute53Client{
+			ListHostedZonesByNameFunc: func(context.Context, *route53.ListHostedZonesByNameInput, ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error) {
+				return &route53.ListHostedZonesByNameOutput{}, nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceReadRequest(t, schema, state)
+	resp := &resource.ReadResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Read(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	var got DomainRegistrationResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("reading response state returned diagnostics: %v", resp.Diagnostics)
+	}
+	if got.AdminContact.Email.ValueString() != "new-admin@example.com" {
+		t.Fatalf("admin email = %q, want %q", got.AdminContact.Email.ValueString(), "new-admin@example.com")
+	}
+	if got.AdminPrivacy.ValueBool() {
+		t.Fatal("admin privacy was not refreshed from AWS")
+	}
+}
+
+func TestCreateWarnsAndKeepsStateWhenPostRegistrationTagSyncFails(t *testing.T) {
+	ctx := context.Background()
+	plan := testDomainModel(t, "example.com")
+	plan.Tags = stringMapValue(t, map[string]string{"Environment": "prod"})
+	plan.TagsAll = stringMapValue(t, map[string]string{"Environment": "prod"})
+	plan.Nameservers = tftypes.ListNull(tftypes.StringType)
+
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			RegisterDomainFunc: func(_ context.Context, _ *route53domains.RegisterDomainInput, _ ...func(*route53domains.Options)) (*route53domains.RegisterDomainOutput, error) {
+				return &route53domains.RegisterDomainOutput{OperationId: aws.String("op-123")}, nil
+			},
+			GetOperationDetailFunc: func(_ context.Context, _ *route53domains.GetOperationDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error) {
+				return &route53domains.GetOperationDetailOutput{Status: types.OperationStatusSuccessful}, nil
+			},
+			UpdateTagsForDomainFunc: func(context.Context, *route53domains.UpdateTagsForDomainInput, ...func(*route53domains.Options)) (*route53domains.UpdateTagsForDomainOutput, error) {
+				return nil, errMockAccessDenied
+			},
+			ListTagsForDomainFunc: func(context.Context, *route53domains.ListTagsForDomainInput, ...func(*route53domains.Options)) (*route53domains.ListTagsForDomainOutput, error) {
+				return &route53domains.ListTagsForDomainOutput{}, nil
+			},
+			GetDomainDetailFunc: func(_ context.Context, _ *route53domains.GetDomainDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				return MockDomainDetailResponse("example.com"), nil
+			},
+		},
+		route53Client: &MockRoute53Client{
+			ListHostedZonesByNameFunc: func(context.Context, *route53.ListHostedZonesByNameInput, ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error) {
+				return &route53.ListHostedZonesByNameOutput{}, nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceCreateRequest(t, schema, plan)
+	resp := &resource.CreateResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Create(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create returned error diagnostics: %v", resp.Diagnostics)
+	}
+	if len(resp.Diagnostics) == 0 {
+		t.Fatal("expected warning diagnostic for failed post-registration tag sync")
+	}
+
+	var got DomainRegistrationResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("reading response state returned diagnostics: %v", resp.Diagnostics)
+	}
+	if got.ID.ValueString() != "example.com" {
+		t.Fatalf("id = %q, want %q", got.ID.ValueString(), "example.com")
+	}
+}
+
 func stringListValue(t *testing.T, values ...string) tftypes.List {
 	t.Helper()
 
@@ -332,6 +638,97 @@ func testContactModel(email string) *ContactModel {
 		CountryCode:  stringValue("US"),
 		ContactType:  stringValue("PERSON"),
 	}
+}
+
+func stringMapValue(t *testing.T, values map[string]string) tftypes.Map {
+	t.Helper()
+
+	result, diags := stringMapToFrameworkMap(values)
+	if diags.HasError() {
+		t.Fatalf("creating string map returned diagnostics: %v", diags)
+	}
+	return result
+}
+
+func testDomainResourceSchema(t *testing.T) resourceschema.Schema {
+	t.Helper()
+
+	ctx := context.Background()
+	r := NewDomainRegistrationResource()
+	req := resource.SchemaRequest{}
+	resp := &resource.SchemaResponse{}
+	r.Schema(ctx, req, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Schema returned diagnostics: %v", resp.Diagnostics)
+	}
+	return resp.Schema
+}
+
+func testDomainModel(t *testing.T, domainName string) DomainRegistrationResourceModel {
+	t.Helper()
+
+	return DomainRegistrationResourceModel{
+		ID:                  tftypes.StringValue(domainName),
+		DomainName:          tftypes.StringValue(domainName),
+		DurationYears:       tftypes.Int64Value(1),
+		AutoRenew:           tftypes.BoolValue(false),
+		AdminContact:        testContactModel("admin@example.com"),
+		RegistrantContact:   testContactModel("registrant@example.com"),
+		TechContact:         testContactModel("tech@example.com"),
+		AdminPrivacy:        tftypes.BoolValue(true),
+		RegistrantPrivacy:   tftypes.BoolValue(true),
+		TechPrivacy:         tftypes.BoolValue(true),
+		Nameservers:         stringListValue(t, "ns1.example.com", "ns2.example.com"),
+		Tags:                emptyFrameworkStringMap(),
+		TagsAll:             emptyFrameworkStringMap(),
+		AllowDelete:         tftypes.BoolValue(false),
+		DeleteHostedZone:    tftypes.BoolValue(false),
+		Status:              tftypes.StringValue("ok"),
+		ExpirationDate:      tftypes.StringValue(time.Now().AddDate(1, 0, 0).Format(time.RFC3339)),
+		CreationDate:        tftypes.StringValue(time.Now().Format(time.RFC3339)),
+		RegistrationTimeout: tftypes.Int64Value(900),
+		HostedZoneID:        tftypes.StringNull(),
+	}
+}
+
+func resourceCreateRequest(t *testing.T, schema resourceschema.Schema, plan DomainRegistrationResourceModel) resource.CreateRequest {
+	t.Helper()
+
+	req := resource.CreateRequest{Plan: tfsdk.Plan{Schema: schema}}
+	diags := req.Plan.Set(context.Background(), &plan)
+	if diags.HasError() {
+		t.Fatalf("setting create plan returned diagnostics: %v", diags)
+	}
+	return req
+}
+
+func resourceReadRequest(t *testing.T, schema resourceschema.Schema, state DomainRegistrationResourceModel) resource.ReadRequest {
+	t.Helper()
+
+	req := resource.ReadRequest{State: tfsdk.State{Schema: schema}}
+	diags := req.State.Set(context.Background(), &state)
+	if diags.HasError() {
+		t.Fatalf("setting read state returned diagnostics: %v", diags)
+	}
+	return req
+}
+
+func resourceUpdateRequest(t *testing.T, schema resourceschema.Schema, plan, state DomainRegistrationResourceModel) resource.UpdateRequest {
+	t.Helper()
+
+	req := resource.UpdateRequest{
+		Plan:  tfsdk.Plan{Schema: schema},
+		State: tfsdk.State{Schema: schema},
+	}
+	diags := req.Plan.Set(context.Background(), &plan)
+	if diags.HasError() {
+		t.Fatalf("setting update plan returned diagnostics: %v", diags)
+	}
+	diags = req.State.Set(context.Background(), &state)
+	if diags.HasError() {
+		t.Fatalf("setting update state returned diagnostics: %v", diags)
+	}
+	return req
 }
 
 // Helper to create terraform string values for testing

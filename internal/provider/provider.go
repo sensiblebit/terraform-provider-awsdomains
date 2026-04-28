@@ -8,6 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/route53"
 	"github.com/aws/aws-sdk-go-v2/service/route53domains"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -15,6 +16,7 @@ import (
 )
 
 var _ provider.Provider = &AWSDomainsProvider{}
+var _ provider.ProviderWithValidateConfig = &AWSDomainsProvider{}
 
 // AWSDomainsProvider implements the Terraform provider entrypoint.
 type AWSDomainsProvider struct {
@@ -84,6 +86,28 @@ func (p *AWSDomainsProvider) Schema(_ context.Context, _ provider.SchemaRequest,
 	}
 }
 
+// ValidateConfig validates provider-level configuration before AWS clients are configured.
+func (p *AWSDomainsProvider) ValidateConfig(ctx context.Context, req provider.ValidateConfigRequest, resp *provider.ValidateConfigResponse) {
+	var data AWSDomainsProviderModel
+
+	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if data.DefaultTags == nil || !frameworkMapElementsKnown(data.DefaultTags.Tags) {
+		return
+	}
+
+	defaultTags, diags := frameworkMapToStringMap(ctx, data.DefaultTags.Tags)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	addTagValidationDiagnostics(&resp.Diagnostics, path.Root("default_tags").AtName("tags"), defaultTags)
+}
+
 // Configure creates AWS service clients and shares them with resources and data sources.
 func (p *AWSDomainsProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
 	var data AWSDomainsProviderModel
@@ -111,6 +135,10 @@ func (p *AWSDomainsProvider) Configure(ctx context.Context, req provider.Configu
 	if data.DefaultTags != nil {
 		convertedDefaultTags, diags := frameworkMapToStringMap(ctx, data.DefaultTags.Tags)
 		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		addTagValidationDiagnostics(&resp.Diagnostics, path.Root("default_tags").AtName("tags"), convertedDefaultTags)
 		if resp.Diagnostics.HasError() {
 			return
 		}

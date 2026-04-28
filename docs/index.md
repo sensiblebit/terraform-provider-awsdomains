@@ -89,6 +89,8 @@ The provider uses the AWS SDK for Go v2 and supports the standard AWS authentica
 
 - `tags` (Map of String) Default tag keys and values. Resource-level tags override default tags with the same key.
 
+Route53 Domains allows up to 50 merged provider and resource tags. Tag keys must be 1-128 characters, values must be 0-256 characters, and both may contain only letters, numbers, spaces, and `. : / = + - @`.
+
 ## Required IAM Permissions
 
 ```json
@@ -107,9 +109,6 @@ The provider uses the AWS SDK for Go v2 and supports the standard AWS authentica
         "route53domains:EnableDomainAutoRenew",
         "route53domains:DisableDomainAutoRenew",
         "route53domains:DeleteDomain",
-        "route53domains:ListTagsForDomain",
-        "route53domains:UpdateTagsForDomain",
-        "route53domains:DeleteTagsForDomain",
         "route53domains:ListDomains",
         "route53domains:CheckDomainAvailability",
         "route53domains:ListPrices",
@@ -122,3 +121,5 @@ The provider uses the AWS SDK for Go v2 and supports the standard AWS authentica
   ]
 }
 ```
+
+Add `route53domains:ListTagsForDomain`, `route53domains:UpdateTagsForDomain`, and `route53domains:DeleteTagsForDomain` when using provider `default_tags`, resource `tags`, or managing resources that already have tracked tags in state.
