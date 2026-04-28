@@ -287,6 +287,7 @@ func TestContactModelToAWS(t *testing.T) {
 			}
 			if result == nil {
 				t.Fatal("Expected non-nil result")
+				return
 			}
 			if aws.ToString(result.FirstName) != aws.ToString(tt.expected.FirstName) {
 				t.Errorf("FirstName mismatch: got %s, want %s", aws.ToString(result.FirstName), aws.ToString(tt.expected.FirstName))
