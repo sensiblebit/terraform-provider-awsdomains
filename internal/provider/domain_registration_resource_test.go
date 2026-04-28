@@ -738,6 +738,12 @@ func TestCreateWarnsAndKeepsStateWhenDomainDetailRefreshFails(t *testing.T) {
 	if got.ID.ValueString() != "example.com" {
 		t.Fatalf("id = %q, want %q", got.ID.ValueString(), "example.com")
 	}
+	if got.Status.ValueString() != string(types.OperationStatusSuccessful) {
+		t.Fatalf("status = %q, want %q", got.Status.ValueString(), types.OperationStatusSuccessful)
+	}
+	if got.RegistrationOperationID.ValueString() != "op-123" {
+		t.Fatalf("registration_operation_id = %q, want %q", got.RegistrationOperationID.ValueString(), "op-123")
+	}
 }
 
 func TestReadKeepsPendingRegistrationStateWhenDomainDetailFails(t *testing.T) {
@@ -786,6 +792,55 @@ func TestReadKeepsPendingRegistrationStateWhenDomainDetailFails(t *testing.T) {
 	}
 }
 
+func TestReadKeepsUnhydratedRegistrationStateWithOperationIDWhenDomainDetailFails(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	state.Status = tftypes.StringNull()
+	state.RegistrationOperationID = tftypes.StringValue("op-123")
+
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			GetDomainDetailFunc: func(context.Context, *route53domains.GetDomainDetailInput, ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				return nil, errMockAccessDenied
+			},
+			GetOperationDetailFunc: func(_ context.Context, params *route53domains.GetOperationDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error) {
+				if got := aws.ToString(params.OperationId); got != "op-123" {
+					t.Fatalf("operation ID = %q, want %q", got, "op-123")
+				}
+				return &route53domains.GetOperationDetailOutput{Status: types.OperationStatusSuccessful}, nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceReadRequest(t, schema, state)
+	resp := &resource.ReadResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Read(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read returned error diagnostics: %v", resp.Diagnostics)
+	}
+	if len(resp.Diagnostics) == 0 {
+		t.Fatal("expected warning diagnostic for unhydrated registration detail read failure")
+	}
+
+	var got DomainRegistrationResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("reading response state returned diagnostics: %v", resp.Diagnostics)
+	}
+	if got.ID.ValueString() != "example.com" {
+		t.Fatalf("id = %q, want %q", got.ID.ValueString(), "example.com")
+	}
+	if got.Status.ValueString() != string(types.OperationStatusSuccessful) {
+		t.Fatalf("status = %q, want %q", got.Status.ValueString(), types.OperationStatusSuccessful)
+	}
+	if got.RegistrationOperationID.ValueString() != "op-123" {
+		t.Fatalf("registration_operation_id = %q, want %q", got.RegistrationOperationID.ValueString(), "op-123")
+	}
+}
+
 func TestReadRemovesPendingRegistrationStateWhenOperationFails(t *testing.T) {
 	ctx := context.Background()
 	state := testDomainModel(t, "example.com")
@@ -823,6 +878,32 @@ func TestReadRemovesPendingRegistrationStateWhenOperationFails(t *testing.T) {
 	}
 	if !resp.State.Raw.IsNull() {
 		t.Fatalf("state was not removed after failed registration operation: %s", resp.State.Raw.String())
+	}
+}
+
+func TestReadRemovesStateForDomainNotFound(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			GetDomainDetailFunc: func(context.Context, *route53domains.GetDomainDetailInput, ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				return nil, &types.InvalidInput{Message: aws.String("Domain not found")}
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceReadRequest(t, schema, state)
+	resp := &resource.ReadResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Read(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read returned error diagnostics: %v", resp.Diagnostics)
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Fatalf("state was not removed after domain not found: %s", resp.State.Raw.String())
 	}
 }
 
@@ -913,6 +994,170 @@ func TestUpdateReturnsErrorWhenNameserverOperationFails(t *testing.T) {
 	}
 }
 
+func TestUpdateDeletesHostedZoneWhenDeleteHostedZoneEnabled(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	state.DeleteHostedZone = tftypes.BoolValue(false)
+	state.HostedZoneID = tftypes.StringValue("ZREG")
+	plan := state
+	plan.DeleteHostedZone = tftypes.BoolValue(true)
+
+	deleteCallCount := 0
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			GetDomainDetailFunc: func(_ context.Context, _ *route53domains.GetDomainDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				return MockDomainDetailResponse("example.com"), nil
+			},
+		},
+		route53Client: &MockRoute53Client{
+			ListHostedZonesByNameFunc: func(context.Context, *route53.ListHostedZonesByNameInput, ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error) {
+				return &route53.ListHostedZonesByNameOutput{
+					HostedZones: []route53types.HostedZone{
+						{
+							Id:              aws.String("/hostedzone/ZREG"),
+							Name:            aws.String("example.com."),
+							CallerReference: aws.String("RISWorkflow-RD:test"),
+							Config:          &route53types.HostedZoneConfig{Comment: aws.String(registrarHostedZoneComment)},
+						},
+					},
+				}, nil
+			},
+			ListResourceRecordSetsFunc: func(context.Context, *route53.ListResourceRecordSetsInput, ...func(*route53.Options)) (*route53.ListResourceRecordSetsOutput, error) {
+				return &route53.ListResourceRecordSetsOutput{
+					ResourceRecordSets: []route53types.ResourceRecordSet{
+						{Name: aws.String("example.com."), Type: route53types.RRTypeNs},
+						{Name: aws.String("example.com."), Type: route53types.RRTypeSoa},
+					},
+				}, nil
+			},
+			DeleteHostedZoneFunc: func(_ context.Context, params *route53.DeleteHostedZoneInput, _ ...func(*route53.Options)) (*route53.DeleteHostedZoneOutput, error) {
+				if got := aws.ToString(params.Id); got != "/hostedzone/ZREG" {
+					t.Fatalf("hosted zone ID = %q, want %q", got, "/hostedzone/ZREG")
+				}
+				deleteCallCount++
+				return &route53.DeleteHostedZoneOutput{}, nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceUpdateRequest(t, schema, plan, state)
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Update(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update returned diagnostics: %v", resp.Diagnostics)
+	}
+	if deleteCallCount != 1 {
+		t.Fatalf("DeleteHostedZone call count = %d, want %d", deleteCallCount, 1)
+	}
+
+	var got DomainRegistrationResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("reading response state returned diagnostics: %v", resp.Diagnostics)
+	}
+	if !got.HostedZoneID.IsNull() {
+		t.Fatalf("hosted_zone_id = %q, want null", got.HostedZoneID.ValueString())
+	}
+}
+
+func TestUpdateRetriesHostedZoneDeletionWhenStillTracked(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	state.DeleteHostedZone = tftypes.BoolValue(true)
+	state.HostedZoneID = tftypes.StringValue("ZREG")
+	plan := state
+
+	deleteCallCount := 0
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			GetDomainDetailFunc: func(_ context.Context, _ *route53domains.GetDomainDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				return MockDomainDetailResponse("example.com"), nil
+			},
+		},
+		route53Client: &MockRoute53Client{
+			ListHostedZonesByNameFunc: func(context.Context, *route53.ListHostedZonesByNameInput, ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error) {
+				return &route53.ListHostedZonesByNameOutput{
+					HostedZones: []route53types.HostedZone{
+						{
+							Id:              aws.String("/hostedzone/ZREG"),
+							Name:            aws.String("example.com."),
+							CallerReference: aws.String("RISWorkflow-RD:test"),
+							Config:          &route53types.HostedZoneConfig{Comment: aws.String(registrarHostedZoneComment)},
+						},
+					},
+				}, nil
+			},
+			ListResourceRecordSetsFunc: func(context.Context, *route53.ListResourceRecordSetsInput, ...func(*route53.Options)) (*route53.ListResourceRecordSetsOutput, error) {
+				return &route53.ListResourceRecordSetsOutput{
+					ResourceRecordSets: []route53types.ResourceRecordSet{
+						{Name: aws.String("example.com."), Type: route53types.RRTypeNs},
+						{Name: aws.String("example.com."), Type: route53types.RRTypeSoa},
+					},
+				}, nil
+			},
+			DeleteHostedZoneFunc: func(context.Context, *route53.DeleteHostedZoneInput, ...func(*route53.Options)) (*route53.DeleteHostedZoneOutput, error) {
+				deleteCallCount++
+				return &route53.DeleteHostedZoneOutput{}, nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceUpdateRequest(t, schema, plan, state)
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Update(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update returned diagnostics: %v", resp.Diagnostics)
+	}
+	if deleteCallCount != 1 {
+		t.Fatalf("DeleteHostedZone call count = %d, want %d", deleteCallCount, 1)
+	}
+}
+
+func TestModifyPlanPlansHostedZoneCleanupRetry(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	state.DeleteHostedZone = tftypes.BoolValue(true)
+	state.HostedZoneID = tftypes.StringValue("ZREG")
+	plan := state
+
+	schema := testDomainResourceSchema(t)
+	req := resource.ModifyPlanRequest{
+		Plan:  tfsdk.Plan{Schema: schema},
+		State: tfsdk.State{Schema: schema},
+	}
+	diags := req.Plan.Set(ctx, &plan)
+	if diags.HasError() {
+		t.Fatalf("setting modify plan returned diagnostics: %v", diags)
+	}
+	diags = req.State.Set(ctx, &state)
+	if diags.HasError() {
+		t.Fatalf("setting modify state returned diagnostics: %v", diags)
+	}
+
+	resp := &resource.ModifyPlanResponse{Plan: req.Plan}
+	domainResource := &DomainRegistrationResource{}
+	domainResource.ModifyPlan(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("ModifyPlan returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	var got DomainRegistrationResourceModel
+	resp.Diagnostics.Append(resp.Plan.Get(ctx, &got)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("reading modified plan returned diagnostics: %v", resp.Diagnostics)
+	}
+	if !got.HostedZoneID.IsNull() {
+		t.Fatalf("planned hosted_zone_id = %q, want null", got.HostedZoneID.ValueString())
+	}
+}
+
 func TestUpdateTagReconcilePreservesUnmanagedRemoteTags(t *testing.T) {
 	ctx := context.Background()
 	state := testDomainModel(t, "example.com")
@@ -971,6 +1216,76 @@ func TestUpdateTagReconcilePreservesUnmanagedRemoteTags(t *testing.T) {
 	}
 	if !reflect.DeepEqual(deletedTags, []string{"OldManaged"}) {
 		t.Fatalf("deleted tags = %#v, want %#v", deletedTags, []string{"OldManaged"})
+	}
+}
+
+func TestDeleteWaitsForDomainDeletionOperation(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	state.AllowDelete = tftypes.BoolValue(true)
+
+	waitedForOperation := false
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			DeleteDomainFunc: func(_ context.Context, _ *route53domains.DeleteDomainInput, _ ...func(*route53domains.Options)) (*route53domains.DeleteDomainOutput, error) {
+				return &route53domains.DeleteDomainOutput{OperationId: aws.String("op-delete")}, nil
+			},
+			GetOperationDetailFunc: func(_ context.Context, params *route53domains.GetOperationDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error) {
+				if got := aws.ToString(params.OperationId); got != "op-delete" {
+					t.Fatalf("operation ID = %q, want %q", got, "op-delete")
+				}
+				waitedForOperation = true
+				return &route53domains.GetOperationDetailOutput{Status: types.OperationStatusSuccessful}, nil
+			},
+		},
+		route53Client: &MockRoute53Client{
+			ListHostedZonesByNameFunc: func(context.Context, *route53.ListHostedZonesByNameInput, ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error) {
+				return &route53.ListHostedZonesByNameOutput{}, nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceDeleteRequest(t, schema, state)
+	resp := &resource.DeleteResponse{}
+
+	domainResource.Delete(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Delete returned diagnostics: %v", resp.Diagnostics)
+	}
+	if !waitedForOperation {
+		t.Fatal("GetOperationDetail was not called for domain deletion")
+	}
+}
+
+func TestDeleteReturnsErrorWhenDomainDeletionOperationFails(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	state.AllowDelete = tftypes.BoolValue(true)
+
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			DeleteDomainFunc: func(_ context.Context, _ *route53domains.DeleteDomainInput, _ ...func(*route53domains.Options)) (*route53domains.DeleteDomainOutput, error) {
+				return &route53domains.DeleteDomainOutput{OperationId: aws.String("op-delete")}, nil
+			},
+			GetOperationDetailFunc: func(_ context.Context, _ *route53domains.GetOperationDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error) {
+				return &route53domains.GetOperationDetailOutput{
+					Status:  types.OperationStatusFailed,
+					Message: aws.String("registry refused deletion"),
+				}, nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceDeleteRequest(t, schema, state)
+	resp := &resource.DeleteResponse{}
+
+	domainResource.Delete(ctx, req, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected domain deletion failure diagnostic")
 	}
 }
 
@@ -1088,6 +1403,17 @@ func resourceUpdateRequest(t *testing.T, schema resourceschema.Schema, plan, sta
 	diags = req.State.Set(context.Background(), &state)
 	if diags.HasError() {
 		t.Fatalf("setting update state returned diagnostics: %v", diags)
+	}
+	return req
+}
+
+func resourceDeleteRequest(t *testing.T, schema resourceschema.Schema, state DomainRegistrationResourceModel) resource.DeleteRequest {
+	t.Helper()
+
+	req := resource.DeleteRequest{State: tfsdk.State{Schema: schema}}
+	diags := req.State.Set(context.Background(), &state)
+	if diags.HasError() {
+		t.Fatalf("setting delete state returned diagnostics: %v", diags)
 	}
 	return req
 }

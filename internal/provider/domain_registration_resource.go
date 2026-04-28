@@ -12,6 +12,7 @@ import (
 	route53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
 	"github.com/aws/aws-sdk-go-v2/service/route53domains"
 	"github.com/aws/aws-sdk-go-v2/service/route53domains/types"
+	smithy "github.com/aws/smithy-go"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -527,6 +528,16 @@ func nameserversRemoved(plan, state tftypes.List) bool {
 	return len(plan.Elements()) == 0
 }
 
+func shouldDeleteRegistrarHostedZone(plan, state DomainRegistrationResourceModel) bool {
+	if plan.DeleteHostedZone.IsUnknown() || !plan.DeleteHostedZone.ValueBool() {
+		return false
+	}
+	if state.DeleteHostedZone.IsNull() || state.DeleteHostedZone.IsUnknown() || !state.DeleteHostedZone.ValueBool() {
+		return true
+	}
+	return !state.HostedZoneID.IsNull() && !state.HostedZoneID.IsUnknown()
+}
+
 type domainOperationWaitResult struct {
 	Status   types.OperationStatus
 	Message  string
@@ -658,19 +669,68 @@ func domainRegistrationMayBePending(data DomainRegistrationResourceModel) bool {
 	}
 }
 
-func (r *DomainRegistrationResource) handlePendingRegistrationReadError(ctx context.Context, data *DomainRegistrationResourceModel, domainName string, readErr error, resp *resource.ReadResponse) bool {
-	if !domainRegistrationMayBePending(*data) {
-		return false
+func domainRegistrationNeedsHydration(data DomainRegistrationResourceModel) bool {
+	if data.Status.IsNull() || data.Status.IsUnknown() {
+		return true
 	}
 
+	switch types.OperationStatus(data.Status.ValueString()) {
+	case types.OperationStatusSubmitted, types.OperationStatusInProgress, types.OperationStatusSuccessful:
+		return true
+	case types.OperationStatusError, types.OperationStatusFailed:
+		return false
+	default:
+		return false
+	}
+}
+
+func domainRegistrationStatusMessage(data DomainRegistrationResourceModel) string {
+	if data.Status.IsNull() || data.Status.IsUnknown() {
+		return "unknown"
+	}
+	return data.Status.ValueString()
+}
+
+func domainNotFoundMessage(message string) bool {
+	normalized := strings.ToLower(message)
+	return strings.Contains(normalized, "not found") ||
+		strings.Contains(normalized, "does not exist") ||
+		strings.Contains(normalized, "doesn't exist") ||
+		strings.Contains(normalized, "does not belong") ||
+		strings.Contains(normalized, "doesn't belong")
+}
+
+func isDomainNotFoundError(err error) bool {
+	var invalidInput *types.InvalidInput
+	if errors.As(err, &invalidInput) {
+		return domainNotFoundMessage(invalidInput.ErrorMessage())
+	}
+
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidInput" {
+		return domainNotFoundMessage(apiErr.ErrorMessage())
+	}
+
+	return false
+}
+
+func (r *DomainRegistrationResource) handleRegistrationReadError(ctx context.Context, data *DomainRegistrationResourceModel, domainName string, readErr error, resp *resource.ReadResponse) bool {
 	operationID := registrationOperationID(*data)
 	if operationID == "" {
+		if !domainRegistrationMayBePending(*data) {
+			return false
+		}
+
 		resp.Diagnostics.AddWarning(
 			"Domain Registration Still Pending",
-			fmt.Sprintf("Could not read domain details for %s while registration status is %s, and no registration operation ID is available to confirm final status: %s. The resource will remain in Terraform state so a later refresh can reconcile the domain instead of launching another registration.", domainName, data.Status.ValueString(), readErr.Error()),
+			fmt.Sprintf("Could not read domain details for %s while registration status is %s, and no registration operation ID is available to confirm final status: %s. The resource will remain in Terraform state so a later refresh can reconcile the domain instead of launching another registration.", domainName, domainRegistrationStatusMessage(*data), readErr.Error()),
 		)
 		resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
 		return true
+	}
+
+	if !domainRegistrationNeedsHydration(*data) {
+		return false
 	}
 
 	opDetail, err := r.client.GetOperationDetail(ctx, &route53domains.GetOperationDetailInput{
@@ -678,8 +738,8 @@ func (r *DomainRegistrationResource) handlePendingRegistrationReadError(ctx cont
 	})
 	if err != nil {
 		resp.Diagnostics.AddWarning(
-			"Domain Registration Still Pending",
-			fmt.Sprintf("Could not read domain details for %s while registration status is %s, and could not check registration operation %s: %s. The resource will remain in Terraform state so a later refresh can reconcile the domain instead of launching another registration.", domainName, data.Status.ValueString(), operationID, err.Error()),
+			"Domain Registration Status Unknown",
+			fmt.Sprintf("Could not read domain details for %s while registration status is %s, and could not check registration operation %s: %s. The resource will remain in Terraform state so a later refresh can reconcile the domain instead of launching another registration.", domainName, domainRegistrationStatusMessage(*data), operationID, err.Error()),
 		)
 		resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
 		return true
@@ -693,14 +753,26 @@ func (r *DomainRegistrationResource) handlePendingRegistrationReadError(ctx cont
 		)
 		resp.State.RemoveResource(ctx)
 		return true
-	case types.OperationStatusSubmitted, types.OperationStatusInProgress, types.OperationStatusSuccessful:
+	case types.OperationStatusSubmitted, types.OperationStatusInProgress:
+		data.Status = tftypes.StringValue(string(opDetail.Status))
 		resp.Diagnostics.AddWarning(
 			"Domain Registration Still Pending",
 			fmt.Sprintf("Could not read domain details for %s while registration operation %s is %s: %s. The resource will remain in Terraform state so a later refresh can reconcile the domain instead of launching another registration.", domainName, operationID, opDetail.Status, readErr.Error()),
 		)
 		resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
 		return true
+	case types.OperationStatusSuccessful:
+		data.Status = tftypes.StringValue(string(opDetail.Status))
+		resp.Diagnostics.AddWarning(
+			"Domain Details Refresh Failed",
+			fmt.Sprintf("Registration operation %s for %s completed successfully, but domain details could not be read: %s. The resource will remain in Terraform state so a later refresh can reconcile computed fields instead of launching another registration.", operationID, domainName, readErr.Error()),
+		)
+		resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
+		return true
 	default:
+		if opDetail.Status != "" {
+			data.Status = tftypes.StringValue(string(opDetail.Status))
+		}
 		resp.Diagnostics.AddWarning(
 			"Domain Registration Status Unknown",
 			fmt.Sprintf("Could not read domain details for %s and registration operation %s returned unrecognized status %s: %s. The resource will remain in Terraform state so a later refresh can reconcile the domain instead of launching another registration.", domainName, operationID, opDetail.Status, readErr.Error()),
@@ -923,17 +995,32 @@ func (r *DomainRegistrationResource) deleteRegistrarHostedZone(ctx context.Conte
 	return nil
 }
 
-// ModifyPlan computes tags_all from provider default_tags and resource-level tags.
+// ModifyPlan computes tags_all from provider default_tags and plans hosted-zone cleanup retries.
 func (r *DomainRegistrationResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.Plan.Raw.IsNull() {
 		return
 	}
 
 	var data DomainRegistrationResourceModel
+	var state DomainRegistrationResourceModel
 
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
 		return
+	}
+
+	if !req.State.Raw.IsNull() {
+		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		if shouldDeleteRegistrarHostedZone(data, state) {
+			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("hosted_zone_id"), tftypes.StringNull())...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+		}
 	}
 
 	if !frameworkMapElementsKnown(data.Tags) {
@@ -1135,6 +1222,11 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 			fmt.Sprintf("The domain %s was registered, but details could not be refreshed: %s. The resource will remain in Terraform state so a later refresh can reconcile computed fields.", domainName, err.Error()),
 		)
 		prepareRegisteredDomainState(&data, domainName)
+		if operationResult.Status != "" {
+			data.Status = tftypes.StringValue(string(operationResult.Status))
+		} else {
+			data.Status = tftypes.StringValue(string(types.OperationStatusSuccessful))
+		}
 	} else {
 		// Update state
 		resp.Diagnostics.Append(r.populateDomainDetailState(ctx, &data, domainDetail)...)
@@ -1210,12 +1302,19 @@ func (r *DomainRegistrationResource) Read(ctx context.Context, req resource.Read
 		DomainName: aws.String(domainName),
 	})
 	if err != nil {
-		if r.handlePendingRegistrationReadError(ctx, &data, domainName, err, resp) {
+		if r.handleRegistrationReadError(ctx, &data, domainName, err, resp) {
 			return
 		}
 
-		// If domain not found, remove from state
-		resp.State.RemoveResource(ctx)
+		if isDomainNotFoundError(err) {
+			resp.State.RemoveResource(ctx)
+			return
+		}
+
+		resp.Diagnostics.AddError(
+			"Error reading domain details",
+			fmt.Sprintf("Could not read domain details for %s: %s", domainName, err.Error()),
+		)
 		return
 	}
 
@@ -1435,6 +1534,17 @@ func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.Up
 		}
 	}
 
+	if shouldDeleteRegistrarHostedZone(data, state) {
+		if err := r.deleteRegistrarHostedZone(ctx, domainName); err != nil {
+			resp.Diagnostics.AddError(
+				"Error deleting hosted zone",
+				fmt.Sprintf("Could not delete the registrar-created hosted zone for %s: %s", domainName, err.Error()),
+			)
+			return
+		}
+		data.HostedZoneID = tftypes.StringNull()
+	}
+
 	// Refresh state
 	domainDetail, err := r.client.GetDomainDetail(ctx, &route53domains.GetDomainDetailInput{
 		DomainName: aws.String(domainName),
@@ -1486,21 +1596,34 @@ func (r *DomainRegistrationResource) Delete(ctx context.Context, req resource.De
 	})
 
 	// Attempt to delete the domain
-	_, err := r.client.DeleteDomain(ctx, &route53domains.DeleteDomainInput{
+	deleteOutput, err := r.client.DeleteDomain(ctx, &route53domains.DeleteDomainInput{
 		DomainName: aws.String(domainName),
 	})
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error deleting domain",
-			fmt.Sprintf("Could not delete domain %s: %s. Note: Domain deletion may not be supported by the registry. The domain has been removed from Terraform state.", domainName, err.Error()),
+			fmt.Sprintf("Could not delete domain %s: %s. Note: Domain deletion may not be supported by the registry. Terraform will keep the resource in state so a later destroy can retry.", domainName, err.Error()),
 		)
-		// Still remove from state even if delete fails
 		return
 	}
 
+	var deleteOperationID *string
+	if deleteOutput != nil {
+		deleteOperationID = deleteOutput.OperationId
+	}
+
 	tflog.Info(ctx, "Domain deletion initiated", map[string]any{
-		"domain": domainName,
+		"domain":       domainName,
+		"operation_id": aws.ToString(deleteOperationID),
 	})
+
+	if _, err := r.waitForDomainOperation(ctx, deleteOperationID, domainName, "domain deletion", domainOperationTimeout(data.RegistrationTimeout)); err != nil {
+		resp.Diagnostics.AddError(
+			"Error waiting for domain deletion",
+			fmt.Sprintf("Could not confirm domain deletion for %s: %s", domainName, err.Error()),
+		)
+		return
+	}
 
 	// Attempt to delete the registrar-created hosted zone (safe - only deletes if all safeguards pass)
 	err = r.deleteRegistrarHostedZone(ctx, domainName)
