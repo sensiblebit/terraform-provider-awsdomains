@@ -170,7 +170,7 @@ output "cost" {
 terraform import 'awsdomains_domain.example' example.com
 ```
 
-**Note**: Contact information is NOT populated during import. First `apply` after import will set contacts.
+**Note**: Import sets `domain_name` and `id`; the next refresh populates domain details, contacts, privacy settings, nameservers, and tracked tags from Route53 Domains.
 
 ---
 

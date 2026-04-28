@@ -223,4 +223,4 @@ Domains can be imported using the domain name:
 terraform import awsdomains_domain.example example.com
 ```
 
-~> **Note:** Contact information is not populated during import. After importing, run `terraform apply` to set contact details from your configuration.
+~> **Note:** Import sets `domain_name` and `id`; the next refresh populates domain details, contacts, privacy settings, nameservers, and tracked tags from Route53 Domains.

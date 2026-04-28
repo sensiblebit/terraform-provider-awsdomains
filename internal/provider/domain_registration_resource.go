@@ -625,6 +625,21 @@ func prepareRegisteredDomainState(data *DomainRegistrationResourceModel, domainN
 	}
 }
 
+func domainRegistrationMayBePending(data DomainRegistrationResourceModel) bool {
+	if data.Status.IsNull() || data.Status.IsUnknown() {
+		return false
+	}
+
+	switch types.OperationStatus(data.Status.ValueString()) {
+	case types.OperationStatusSubmitted, types.OperationStatusInProgress:
+		return true
+	case types.OperationStatusError, types.OperationStatusSuccessful, types.OperationStatusFailed:
+		return false
+	default:
+		return false
+	}
+}
+
 func (r *DomainRegistrationResource) populateDomainDetailState(ctx context.Context, data *DomainRegistrationResourceModel, domainDetail *route53domains.GetDomainDetailOutput) diag.Diagnostics {
 	var diags diag.Diagnostics
 
@@ -995,6 +1010,8 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 		prepareRegisteredDomainState(&data, domainName)
 		if operationResult.Status != "" {
 			data.Status = tftypes.StringValue(string(operationResult.Status))
+		} else {
+			data.Status = tftypes.StringValue(string(types.OperationStatusSubmitted))
 		}
 		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 		return
@@ -1008,9 +1025,6 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 				"Domain Registered Without Tags",
 				fmt.Sprintf("The domain %s was registered, but tags could not be updated: %s. The resource will remain in Terraform state so a later apply can retry tag reconciliation.", domainName, err.Error()),
 			)
-			if remoteTags, listErr := r.listDomainTags(ctx, domainName); listErr == nil {
-				tagsAllSource = managedTagsFromRemote(remoteTags, desiredTags)
-			}
 		}
 	}
 
@@ -1125,6 +1139,15 @@ func (r *DomainRegistrationResource) Read(ctx context.Context, req resource.Read
 		DomainName: aws.String(domainName),
 	})
 	if err != nil {
+		if domainRegistrationMayBePending(data) {
+			resp.Diagnostics.AddWarning(
+				"Domain Registration Still Pending",
+				fmt.Sprintf("Could not read domain details for %s while registration status is %s: %s. The resource will remain in Terraform state so a later refresh can reconcile the domain instead of launching another registration.", domainName, data.Status.ValueString(), err.Error()),
+			)
+			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+			return
+		}
+
 		// If domain not found, remove from state
 		resp.State.RemoveResource(ctx)
 		return

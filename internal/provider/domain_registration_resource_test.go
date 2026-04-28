@@ -590,7 +590,8 @@ func TestCreateWarnsAndKeepsStateWhenPostRegistrationTagSyncFails(t *testing.T) 
 				return nil, errMockAccessDenied
 			},
 			ListTagsForDomainFunc: func(context.Context, *route53domains.ListTagsForDomainInput, ...func(*route53domains.Options)) (*route53domains.ListTagsForDomainOutput, error) {
-				return &route53domains.ListTagsForDomainOutput{}, nil
+				t.Fatal("ListTagsForDomain must not be called after create tag sync failure; state must keep planned tags_all")
+				return nil, errUnexpectedMockRoute53DomainsCall
 			},
 			GetDomainDetailFunc: func(_ context.Context, _ *route53domains.GetDomainDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
 				return MockDomainDetailResponse("example.com"), nil
@@ -623,6 +624,13 @@ func TestCreateWarnsAndKeepsStateWhenPostRegistrationTagSyncFails(t *testing.T) 
 	}
 	if got.ID.ValueString() != "example.com" {
 		t.Fatalf("id = %q, want %q", got.ID.ValueString(), "example.com")
+	}
+	tagsAll, diags := frameworkMapToStringMap(ctx, got.TagsAll)
+	if diags.HasError() {
+		t.Fatalf("reading tags_all returned diagnostics: %v", diags)
+	}
+	if tagsAll["Environment"] != "prod" {
+		t.Fatalf("tags_all[Environment] = %q, want %q", tagsAll["Environment"], "prod")
 	}
 }
 
@@ -725,6 +733,45 @@ func TestCreateWarnsAndKeepsStateWhenDomainDetailRefreshFails(t *testing.T) {
 	}
 	if got.ID.ValueString() != "example.com" {
 		t.Fatalf("id = %q, want %q", got.ID.ValueString(), "example.com")
+	}
+}
+
+func TestReadKeepsPendingRegistrationStateWhenDomainDetailFails(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	state.Status = tftypes.StringValue(string(types.OperationStatusInProgress))
+
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			GetDomainDetailFunc: func(context.Context, *route53domains.GetDomainDetailInput, ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				return nil, errMockAccessDenied
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceReadRequest(t, schema, state)
+	resp := &resource.ReadResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Read(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read returned error diagnostics: %v", resp.Diagnostics)
+	}
+	if len(resp.Diagnostics) == 0 {
+		t.Fatal("expected warning diagnostic for pending registration detail read failure")
+	}
+
+	var got DomainRegistrationResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("reading response state returned diagnostics: %v", resp.Diagnostics)
+	}
+	if got.ID.ValueString() != "example.com" {
+		t.Fatalf("id = %q, want %q", got.ID.ValueString(), "example.com")
+	}
+	if got.Status.ValueString() != string(types.OperationStatusInProgress) {
+		t.Fatalf("status = %q, want %q", got.Status.ValueString(), types.OperationStatusInProgress)
 	}
 }
 
