@@ -23,14 +23,20 @@ type AWSDomainsProvider struct {
 
 // AWSDomainsProviderModel stores provider configuration values.
 type AWSDomainsProviderModel struct {
-	Region  types.String `tfsdk:"region"`
-	Profile types.String `tfsdk:"profile"`
+	Region      types.String      `tfsdk:"region"`
+	Profile     types.String      `tfsdk:"profile"`
+	DefaultTags *DefaultTagsModel `tfsdk:"default_tags"`
+}
+
+type DefaultTagsModel struct {
+	Tags types.Map `tfsdk:"tags"`
 }
 
 // providerData holds the AWS clients passed to resources and data sources.
 type providerData struct {
 	DomainsClient *route53domains.Client
 	Route53Client *route53.Client
+	DefaultTags   map[string]string
 }
 
 // New returns a provider factory for Terraform.
@@ -62,6 +68,18 @@ func (p *AWSDomainsProvider) Schema(_ context.Context, _ provider.SchemaRequest,
 				Optional:    true,
 			},
 		},
+		Blocks: map[string]schema.Block{
+			"default_tags": schema.SingleNestedBlock{
+				Description: "Default tags to apply to all taggable resources managed by this provider.",
+				Attributes: map[string]schema.Attribute{
+					"tags": schema.MapAttribute{
+						Required:    true,
+						ElementType: types.StringType,
+						Description: "Map of default tag keys and values. Resource-level tags override default tags with the same key.",
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -88,6 +106,16 @@ func (p *AWSDomainsProvider) Configure(ctx context.Context, req provider.Configu
 		optFns = append(optFns, config.WithSharedConfigProfile(data.Profile.ValueString()))
 	}
 
+	defaultTags := map[string]string{}
+	if data.DefaultTags != nil {
+		convertedDefaultTags, diags := frameworkMapToStringMap(ctx, data.DefaultTags.Tags)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		defaultTags = convertedDefaultTags
+	}
+
 	cfg, err := config.LoadDefaultConfig(ctx, optFns...)
 	if err != nil {
 		resp.Diagnostics.AddError(
@@ -103,6 +131,7 @@ func (p *AWSDomainsProvider) Configure(ctx context.Context, req provider.Configu
 	providerData := &providerData{
 		DomainsClient: domainsClient,
 		Route53Client: route53Client,
+		DefaultTags:   defaultTags,
 	}
 
 	resp.DataSourceData = providerData

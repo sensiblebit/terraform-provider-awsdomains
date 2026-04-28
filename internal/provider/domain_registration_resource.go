@@ -17,6 +17,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapdefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	tftypes "github.com/hashicorp/terraform-plugin-framework/types"
@@ -25,17 +27,34 @@ import (
 
 var _ resource.Resource = &DomainRegistrationResource{}
 var _ resource.ResourceWithImportState = &DomainRegistrationResource{}
+var _ resource.ResourceWithModifyPlan = &DomainRegistrationResource{}
 
 // DomainRegistrationResource manages Route53 Domains registrations.
 type DomainRegistrationResource struct {
-	client        *route53domains.Client
+	client        route53DomainsAPI
 	route53Client route53API
+	defaultTags   map[string]string
 }
 
 type route53API interface {
 	ListHostedZonesByName(ctx context.Context, params *route53.ListHostedZonesByNameInput, optFns ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error)
 	ListResourceRecordSets(ctx context.Context, params *route53.ListResourceRecordSetsInput, optFns ...func(*route53.Options)) (*route53.ListResourceRecordSetsOutput, error)
 	DeleteHostedZone(ctx context.Context, params *route53.DeleteHostedZoneInput, optFns ...func(*route53.Options)) (*route53.DeleteHostedZoneOutput, error)
+}
+
+type route53DomainsAPI interface {
+	GetDomainDetail(ctx context.Context, params *route53domains.GetDomainDetailInput, optFns ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error)
+	RegisterDomain(ctx context.Context, params *route53domains.RegisterDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.RegisterDomainOutput, error)
+	GetOperationDetail(ctx context.Context, params *route53domains.GetOperationDetailInput, optFns ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error)
+	UpdateDomainNameservers(ctx context.Context, params *route53domains.UpdateDomainNameserversInput, optFns ...func(*route53domains.Options)) (*route53domains.UpdateDomainNameserversOutput, error)
+	EnableDomainAutoRenew(ctx context.Context, params *route53domains.EnableDomainAutoRenewInput, optFns ...func(*route53domains.Options)) (*route53domains.EnableDomainAutoRenewOutput, error)
+	DisableDomainAutoRenew(ctx context.Context, params *route53domains.DisableDomainAutoRenewInput, optFns ...func(*route53domains.Options)) (*route53domains.DisableDomainAutoRenewOutput, error)
+	UpdateDomainContact(ctx context.Context, params *route53domains.UpdateDomainContactInput, optFns ...func(*route53domains.Options)) (*route53domains.UpdateDomainContactOutput, error)
+	UpdateDomainContactPrivacy(ctx context.Context, params *route53domains.UpdateDomainContactPrivacyInput, optFns ...func(*route53domains.Options)) (*route53domains.UpdateDomainContactPrivacyOutput, error)
+	DeleteDomain(ctx context.Context, params *route53domains.DeleteDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.DeleteDomainOutput, error)
+	ListTagsForDomain(ctx context.Context, params *route53domains.ListTagsForDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.ListTagsForDomainOutput, error)
+	UpdateTagsForDomain(ctx context.Context, params *route53domains.UpdateTagsForDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.UpdateTagsForDomainOutput, error)
+	DeleteTagsForDomain(ctx context.Context, params *route53domains.DeleteTagsForDomainInput, optFns ...func(*route53domains.Options)) (*route53domains.DeleteTagsForDomainOutput, error)
 }
 
 const (
@@ -78,6 +97,8 @@ type DomainRegistrationResourceModel struct {
 	RegistrantPrivacy   tftypes.Bool     `tfsdk:"registrant_privacy"`
 	TechPrivacy         tftypes.Bool     `tfsdk:"tech_privacy"`
 	Nameservers         []tftypes.String `tfsdk:"nameservers"`
+	Tags                tftypes.Map      `tfsdk:"tags"`
+	TagsAll             tftypes.Map      `tfsdk:"tags_all"`
 	AllowDelete         tftypes.Bool     `tfsdk:"allow_delete"`
 	DeleteHostedZone    tftypes.Bool     `tfsdk:"delete_hosted_zone"`
 	Status              tftypes.String   `tfsdk:"status"`
@@ -207,6 +228,21 @@ func (r *DomainRegistrationResource) Schema(_ context.Context, _ resource.Schema
 				ElementType: tftypes.StringType,
 				Description: "List of nameserver hostnames for the domain.",
 			},
+			"tags": schema.MapAttribute{
+				Optional:    true,
+				Computed:    true,
+				ElementType: tftypes.StringType,
+				Default:     mapdefault.StaticValue(emptyFrameworkStringMap()),
+				Description: "Resource-level tags for the domain. These override provider default_tags with the same key.",
+			},
+			"tags_all": schema.MapAttribute{
+				Computed:    true,
+				ElementType: tftypes.StringType,
+				Description: "All tags applied to the domain, including provider default_tags and resource-level tags.",
+				PlanModifiers: []planmodifier.Map{
+					mapplanmodifier.UseStateForUnknown(),
+				},
+			},
 			"allow_delete": schema.BoolAttribute{
 				Optional:    true,
 				Computed:    true,
@@ -265,6 +301,7 @@ func (r *DomainRegistrationResource) Configure(_ context.Context, req resource.C
 
 	r.client = providerData.DomainsClient
 	r.route53Client = providerData.Route53Client
+	r.defaultTags = cloneTags(providerData.DefaultTags)
 }
 
 func contactModelToAWS(m *ContactModel) *types.ContactDetail {
@@ -457,6 +494,75 @@ func (r *DomainRegistrationResource) deleteRegistrarHostedZone(ctx context.Conte
 	return nil
 }
 
+// ModifyPlan computes tags_all from provider default_tags and resource-level tags.
+func (r *DomainRegistrationResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+
+	var data DomainRegistrationResourceModel
+
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if !frameworkMapElementsKnown(data.Tags) {
+		return
+	}
+
+	resourceTags, diags := frameworkMapToStringMap(ctx, data.Tags)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	tagsAll, diags := stringMapToFrameworkMap(mergeTags(r.defaultTags, resourceTags))
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("tags_all"), tagsAll)...)
+}
+
+func (r *DomainRegistrationResource) listDomainTags(ctx context.Context, domainName string) (map[string]string, error) {
+	output, err := r.client.ListTagsForDomain(ctx, &route53domains.ListTagsForDomainInput{
+		DomainName: aws.String(domainName),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list domain tags: %w", err)
+	}
+
+	return awsTagsToStringMap(output.TagList), nil
+}
+
+func (r *DomainRegistrationResource) syncDomainTags(ctx context.Context, domainName string, currentTags, desiredTags map[string]string) error {
+	tagsToDelete := tagKeysToDelete(currentTags, desiredTags)
+	if len(tagsToDelete) > 0 {
+		_, err := r.client.DeleteTagsForDomain(ctx, &route53domains.DeleteTagsForDomainInput{
+			DomainName:   aws.String(domainName),
+			TagsToDelete: tagsToDelete,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to delete domain tags: %w", err)
+		}
+	}
+
+	updatedTags := tagsToUpdate(currentTags, desiredTags)
+	if len(updatedTags) > 0 {
+		_, err := r.client.UpdateTagsForDomain(ctx, &route53domains.UpdateTagsForDomainInput{
+			DomainName:   aws.String(domainName),
+			TagsToUpdate: stringMapToAWSTags(updatedTags),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to update domain tags: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // Create registers the domain and records its hosted zone metadata.
 func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var data DomainRegistrationResourceModel
@@ -479,6 +585,13 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 		)
 		return
 	}
+
+	resourceTags, diags := frameworkMapToStringMap(ctx, data.Tags)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	desiredTags := mergeTags(r.defaultTags, resourceTags)
 
 	// Build registration request
 	registerInput := &route53domains.RegisterDomainInput{
@@ -550,6 +663,15 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 		time.Sleep(10 * time.Second)
 	}
 
+	err = r.syncDomainTags(ctx, domainName, map[string]string{}, desiredTags)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Error updating domain tags",
+			fmt.Sprintf("Could not update tags for %s: %s", domainName, err.Error()),
+		)
+		return
+	}
+
 	// Update nameservers if specified
 	if len(data.Nameservers) > 0 {
 		var nameservers []types.Nameserver
@@ -595,6 +717,12 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 	if len(domainDetail.StatusList) > 0 {
 		data.Status = tftypes.StringValue(domainDetail.StatusList[0])
 	}
+	tagsAll, diags := stringMapToFrameworkMap(desiredTags)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	data.TagsAll = tagsAll
 
 	// Handle the auto-created hosted zone
 	if data.DeleteHostedZone.ValueBool() {
@@ -678,6 +806,33 @@ func (r *DomainRegistrationResource) Read(ctx context.Context, req resource.Read
 		data.Nameservers = nameservers
 	}
 
+	remoteTags, err := r.listDomainTags(ctx, domainName)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Error reading domain tags",
+			fmt.Sprintf("Could not read tags for %s: %s", domainName, err.Error()),
+		)
+		return
+	}
+
+	priorResourceTags, diags := frameworkMapToStringMap(ctx, data.Tags)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	data.Tags, diags = stringMapToFrameworkMap(resourceTagsFromRemote(remoteTags, priorResourceTags))
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	data.TagsAll, diags = stringMapToFrameworkMap(remoteTags)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	// Refresh hosted zone ID
 	hostedZoneID, err := r.findHostedZoneID(ctx, domainName)
 	if err != nil {
@@ -701,6 +856,31 @@ func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.Up
 	}
 
 	domainName := data.DomainName.ValueString()
+
+	resourceTags, diags := frameworkMapToStringMap(ctx, data.Tags)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	desiredTags := mergeTags(r.defaultTags, resourceTags)
+
+	currentTags, err := r.listDomainTags(ctx, domainName)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Error reading domain tags",
+			fmt.Sprintf("Could not read tags for %s: %s", domainName, err.Error()),
+		)
+		return
+	}
+
+	err = r.syncDomainTags(ctx, domainName, currentTags, desiredTags)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Error updating domain tags",
+			fmt.Sprintf("Could not update tags for %s: %s", domainName, err.Error()),
+		)
+		return
+	}
 
 	// Update auto-renew if changed
 	if data.AutoRenew.ValueBool() != state.AutoRenew.ValueBool() {
@@ -752,7 +932,7 @@ func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.Up
 	}
 
 	// Update contacts if changed
-	_, err := r.client.UpdateDomainContact(ctx, &route53domains.UpdateDomainContactInput{
+	_, err = r.client.UpdateDomainContact(ctx, &route53domains.UpdateDomainContactInput{
 		DomainName:        aws.String(domainName),
 		AdminContact:      contactModelToAWS(data.AdminContact),
 		RegistrantContact: contactModelToAWS(data.RegistrantContact),
@@ -802,6 +982,11 @@ func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.Up
 	}
 	if len(domainDetail.StatusList) > 0 {
 		data.Status = tftypes.StringValue(domainDetail.StatusList[0])
+	}
+	data.TagsAll, diags = stringMapToFrameworkMap(desiredTags)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)

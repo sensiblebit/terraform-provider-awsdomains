@@ -37,6 +37,9 @@ func TestProviderSchema(t *testing.T) {
 	if _, ok := attrs["profile"]; !ok {
 		t.Error("Schema missing 'profile' attribute")
 	}
+	if _, ok := resp.Schema.Blocks["default_tags"]; !ok {
+		t.Error("Schema missing 'default_tags' block")
+	}
 }
 
 func TestProviderMetadata(t *testing.T) {

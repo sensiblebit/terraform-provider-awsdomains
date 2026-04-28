@@ -16,11 +16,22 @@ terraform {
 
 provider "awsdomains" {
   region = "us-east-1"  # Required: Route53 Domains only works in us-east-1
+
+  default_tags {
+    tags = {
+      Environment = "prod"
+      ManagedBy   = "terraform"
+    }
+  }
 }
 
 resource "awsdomains_domain" "example" {
   domain_name    = "example.com"
   duration_years = 1
+
+  tags = {
+    Name = "example.com"
+  }
 
   admin_contact = {
     first_name     = "John"
@@ -53,6 +64,7 @@ resource "aws_route53_record" "apex" {
 - Manage domain contacts (admin, registrant, tech)
 - Configure WHOIS privacy protection
 - Update nameservers
+- Manage provider default tags and resource-level tags
 - Manage auto-renewal settings
 - **Auto-exposes `hosted_zone_id`** - no data source lookup needed
 - Import existing domains into Terraform state
@@ -74,6 +86,7 @@ resource "aws_route53_record" "apex" {
 | `registrant_privacy` | bool | No | `true` | WHOIS privacy for registrant |
 | `tech_privacy` | bool | No | `true` | WHOIS privacy for tech |
 | `nameservers` | list(string) | No | - | Custom nameservers |
+| `tags` | map(string) | No | `{}` | Resource-level tags; overrides provider default tags |
 | `allow_delete` | bool | No | `false` | Allow domain deletion on destroy |
 | `delete_hosted_zone` | bool | No | `false` | Delete auto-created hosted zone (for external DNS) |
 | `registration_timeout` | number | No | `900` | Timeout in seconds |
@@ -86,6 +99,7 @@ resource "aws_route53_record" "apex" {
 | `status` | Current domain status |
 | `creation_date` | Domain creation date (RFC3339) |
 | `expiration_date` | Domain expiration date (RFC3339) |
+| `tags_all` | All tags applied to the domain, including provider default tags |
 | `hosted_zone_id` | Route53 hosted zone ID (auto-created by AWS) |
 
 ### Contact Object
@@ -187,6 +201,7 @@ Provider creates two clients via `providerData`:
 
 - `DomainsClient`: `*route53domains.Client` - domain registration operations
 - `Route53Client`: `*route53.Client` - hosted zone lookups
+- `DefaultTags`: `map[string]string` - provider-level tags merged into taggable resources
 
 **Region restriction**: Route53 Domains API only works in `us-east-1`
 
@@ -196,24 +211,27 @@ Provider creates two clients via `providerData`:
 
 1. `RegisterDomain` API call
 2. Poll `GetOperationDetail` until `SUCCESSFUL` or timeout
-3. `UpdateDomainNameservers` if specified
-4. `GetDomainDetail` to fetch computed fields
-5. If `delete_hosted_zone = true`: safely delete the registrar-created zone
-6. Otherwise: `ListHostedZonesByName` to get hosted zone ID
+3. `UpdateTagsForDomain` with merged provider/resource tags if any tags are configured
+4. `UpdateDomainNameservers` if specified
+5. `GetDomainDetail` to fetch computed fields
+6. If `delete_hosted_zone = true`: safely delete the registrar-created zone
+7. Otherwise: `ListHostedZonesByName` to get hosted zone ID
 
 ### Read
 
 1. `GetDomainDetail` API call
 2. If error, removes resource from state (known issue - should distinguish 404)
-3. `ListHostedZonesByName` to refresh hosted zone ID
+3. `ListTagsForDomain` to refresh `tags` and `tags_all`
+4. `ListHostedZonesByName` to refresh hosted zone ID
 
 ### Update
 
-1. `EnableDomainAutoRenew` / `DisableDomainAutoRenew` if changed
-2. `UpdateDomainNameservers` if changed
-3. `UpdateDomainContact` for contact changes
-4. `UpdateDomainContactPrivacy` for privacy settings
-5. Refresh state via `GetDomainDetail`
+1. `ListTagsForDomain`, then `UpdateTagsForDomain` / `DeleteTagsForDomain` to reconcile tags
+2. `EnableDomainAutoRenew` / `DisableDomainAutoRenew` if changed
+3. `UpdateDomainNameservers` if changed
+4. `UpdateDomainContact` for contact changes
+5. `UpdateDomainContactPrivacy` for privacy settings
+6. Refresh state via `GetDomainDetail`
 
 ### Delete
 
@@ -262,6 +280,9 @@ Uses `ImportStatePassthroughID` setting both `domain_name` and `id`.
         "route53domains:EnableDomainAutoRenew",
         "route53domains:DisableDomainAutoRenew",
         "route53domains:DeleteDomain",
+        "route53domains:ListTagsForDomain",
+        "route53domains:UpdateTagsForDomain",
+        "route53domains:DeleteTagsForDomain",
         "route53domains:CheckDomainAvailability",
         "route53domains:ListPrices",
         "route53:ListHostedZonesByName",

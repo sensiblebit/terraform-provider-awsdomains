@@ -84,6 +84,8 @@ func TestResourceSchema(t *testing.T) {
 		"registrant_privacy",
 		"tech_privacy",
 		"nameservers",
+		"tags",
+		"tags_all",
 		"allow_delete",
 		"delete_hosted_zone",
 		"status",
