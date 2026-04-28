@@ -95,26 +95,27 @@ type ContactModel struct {
 
 // DomainRegistrationResourceModel stores Terraform state for the domain resource.
 type DomainRegistrationResourceModel struct {
-	ID                  tftypes.String `tfsdk:"id"`
-	DomainName          tftypes.String `tfsdk:"domain_name"`
-	DurationYears       tftypes.Int64  `tfsdk:"duration_years"`
-	AutoRenew           tftypes.Bool   `tfsdk:"auto_renew"`
-	AdminContact        *ContactModel  `tfsdk:"admin_contact"`
-	RegistrantContact   *ContactModel  `tfsdk:"registrant_contact"`
-	TechContact         *ContactModel  `tfsdk:"tech_contact"`
-	AdminPrivacy        tftypes.Bool   `tfsdk:"admin_privacy"`
-	RegistrantPrivacy   tftypes.Bool   `tfsdk:"registrant_privacy"`
-	TechPrivacy         tftypes.Bool   `tfsdk:"tech_privacy"`
-	Nameservers         tftypes.List   `tfsdk:"nameservers"`
-	Tags                tftypes.Map    `tfsdk:"tags"`
-	TagsAll             tftypes.Map    `tfsdk:"tags_all"`
-	AllowDelete         tftypes.Bool   `tfsdk:"allow_delete"`
-	DeleteHostedZone    tftypes.Bool   `tfsdk:"delete_hosted_zone"`
-	Status              tftypes.String `tfsdk:"status"`
-	ExpirationDate      tftypes.String `tfsdk:"expiration_date"`
-	CreationDate        tftypes.String `tfsdk:"creation_date"`
-	RegistrationTimeout tftypes.Int64  `tfsdk:"registration_timeout"`
-	HostedZoneID        tftypes.String `tfsdk:"hosted_zone_id"`
+	ID                      tftypes.String `tfsdk:"id"`
+	DomainName              tftypes.String `tfsdk:"domain_name"`
+	DurationYears           tftypes.Int64  `tfsdk:"duration_years"`
+	AutoRenew               tftypes.Bool   `tfsdk:"auto_renew"`
+	AdminContact            *ContactModel  `tfsdk:"admin_contact"`
+	RegistrantContact       *ContactModel  `tfsdk:"registrant_contact"`
+	TechContact             *ContactModel  `tfsdk:"tech_contact"`
+	AdminPrivacy            tftypes.Bool   `tfsdk:"admin_privacy"`
+	RegistrantPrivacy       tftypes.Bool   `tfsdk:"registrant_privacy"`
+	TechPrivacy             tftypes.Bool   `tfsdk:"tech_privacy"`
+	Nameservers             tftypes.List   `tfsdk:"nameservers"`
+	Tags                    tftypes.Map    `tfsdk:"tags"`
+	TagsAll                 tftypes.Map    `tfsdk:"tags_all"`
+	AllowDelete             tftypes.Bool   `tfsdk:"allow_delete"`
+	DeleteHostedZone        tftypes.Bool   `tfsdk:"delete_hosted_zone"`
+	Status                  tftypes.String `tfsdk:"status"`
+	ExpirationDate          tftypes.String `tfsdk:"expiration_date"`
+	CreationDate            tftypes.String `tfsdk:"creation_date"`
+	RegistrationTimeout     tftypes.Int64  `tfsdk:"registration_timeout"`
+	RegistrationOperationID tftypes.String `tfsdk:"registration_operation_id"`
+	HostedZoneID            tftypes.String `tfsdk:"hosted_zone_id"`
 }
 
 // NewDomainRegistrationResource creates the domain registration resource.
@@ -285,6 +286,13 @@ func (r *DomainRegistrationResource) Schema(_ context.Context, _ resource.Schema
 				Computed:    true,
 				Default:     int64default.StaticInt64(900),
 				Description: "Timeout in seconds to wait for domain registration to complete (default: 900 = 15 minutes).",
+			},
+			"registration_operation_id": schema.StringAttribute{
+				Computed:    true,
+				Description: "Route53 Domains operation ID returned by the registration request. Used to reconcile registrations that are still pending after timeout.",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"hosted_zone_id": schema.StringAttribute{
 				Computed:    true,
@@ -620,9 +628,19 @@ func prepareRegisteredDomainState(data *DomainRegistrationResourceModel, domainN
 	if data.CreationDate.IsUnknown() {
 		data.CreationDate = tftypes.StringNull()
 	}
+	if data.RegistrationOperationID.IsUnknown() {
+		data.RegistrationOperationID = tftypes.StringNull()
+	}
 	if data.HostedZoneID.IsUnknown() {
 		data.HostedZoneID = tftypes.StringNull()
 	}
+}
+
+func registrationOperationID(data DomainRegistrationResourceModel) string {
+	if data.RegistrationOperationID.IsNull() || data.RegistrationOperationID.IsUnknown() {
+		return ""
+	}
+	return data.RegistrationOperationID.ValueString()
 }
 
 func domainRegistrationMayBePending(data DomainRegistrationResourceModel) bool {
@@ -637,6 +655,58 @@ func domainRegistrationMayBePending(data DomainRegistrationResourceModel) bool {
 		return false
 	default:
 		return false
+	}
+}
+
+func (r *DomainRegistrationResource) handlePendingRegistrationReadError(ctx context.Context, data *DomainRegistrationResourceModel, domainName string, readErr error, resp *resource.ReadResponse) bool {
+	if !domainRegistrationMayBePending(*data) {
+		return false
+	}
+
+	operationID := registrationOperationID(*data)
+	if operationID == "" {
+		resp.Diagnostics.AddWarning(
+			"Domain Registration Still Pending",
+			fmt.Sprintf("Could not read domain details for %s while registration status is %s, and no registration operation ID is available to confirm final status: %s. The resource will remain in Terraform state so a later refresh can reconcile the domain instead of launching another registration.", domainName, data.Status.ValueString(), readErr.Error()),
+		)
+		resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
+		return true
+	}
+
+	opDetail, err := r.client.GetOperationDetail(ctx, &route53domains.GetOperationDetailInput{
+		OperationId: aws.String(operationID),
+	})
+	if err != nil {
+		resp.Diagnostics.AddWarning(
+			"Domain Registration Still Pending",
+			fmt.Sprintf("Could not read domain details for %s while registration status is %s, and could not check registration operation %s: %s. The resource will remain in Terraform state so a later refresh can reconcile the domain instead of launching another registration.", domainName, data.Status.ValueString(), operationID, err.Error()),
+		)
+		resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
+		return true
+	}
+
+	switch opDetail.Status {
+	case types.OperationStatusFailed, types.OperationStatusError:
+		resp.Diagnostics.AddWarning(
+			"Domain Registration Failed",
+			fmt.Sprintf("Registration operation %s for %s ended with status %s: %s. Removing the resource from Terraform state so a later apply can retry registration.", operationID, domainName, opDetail.Status, aws.ToString(opDetail.Message)),
+		)
+		resp.State.RemoveResource(ctx)
+		return true
+	case types.OperationStatusSubmitted, types.OperationStatusInProgress, types.OperationStatusSuccessful:
+		resp.Diagnostics.AddWarning(
+			"Domain Registration Still Pending",
+			fmt.Sprintf("Could not read domain details for %s while registration operation %s is %s: %s. The resource will remain in Terraform state so a later refresh can reconcile the domain instead of launching another registration.", domainName, operationID, opDetail.Status, readErr.Error()),
+		)
+		resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
+		return true
+	default:
+		resp.Diagnostics.AddWarning(
+			"Domain Registration Status Unknown",
+			fmt.Sprintf("Could not read domain details for %s and registration operation %s returned unrecognized status %s: %s. The resource will remain in Terraform state so a later refresh can reconcile the domain instead of launching another registration.", domainName, operationID, opDetail.Status, readErr.Error()),
+		)
+		resp.Diagnostics.Append(resp.State.Set(ctx, data)...)
+		return true
 	}
 }
 
@@ -985,6 +1055,7 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 		)
 		return
 	}
+	data.RegistrationOperationID = tftypes.StringValue(aws.ToString(registerOutput.OperationId))
 
 	tflog.Info(ctx, "Domain registration initiated", map[string]any{
 		"domain":       domainName,
@@ -1139,12 +1210,7 @@ func (r *DomainRegistrationResource) Read(ctx context.Context, req resource.Read
 		DomainName: aws.String(domainName),
 	})
 	if err != nil {
-		if domainRegistrationMayBePending(data) {
-			resp.Diagnostics.AddWarning(
-				"Domain Registration Still Pending",
-				fmt.Sprintf("Could not read domain details for %s while registration status is %s: %s. The resource will remain in Terraform state so a later refresh can reconcile the domain instead of launching another registration.", domainName, data.Status.ValueString(), err.Error()),
-			)
-			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+		if r.handlePendingRegistrationReadError(ctx, &data, domainName, err, resp) {
 			return
 		}
 

@@ -192,6 +192,7 @@ resource "awsdomains_domain" "example" {
 - `creation_date` (String) Domain creation date in RFC3339 format.
 - `expiration_date` (String) Domain expiration date in RFC3339 format.
 - `tags_all` (Map of String) Tags managed by this provider, including provider `default_tags` and resource-level `tags`.
+- `registration_operation_id` (String) Route53 Domains operation ID returned by the registration request.
 - `hosted_zone_id` (String) The Route53 hosted zone ID automatically created for this domain.
 
 <a id="nestedatt--contact"></a>

@@ -102,6 +102,7 @@ Route53 Domains allows up to 50 merged provider and resource tags. Tag keys must
 | `creation_date` | Domain creation date (RFC3339) |
 | `expiration_date` | Domain expiration date (RFC3339) |
 | `tags_all` | Tags managed by this provider, including provider default tags |
+| `registration_operation_id` | Route53 Domains operation ID returned by the registration request |
 | `hosted_zone_id` | Route53 hosted zone ID (auto-created by AWS) |
 
 ### Contact Object

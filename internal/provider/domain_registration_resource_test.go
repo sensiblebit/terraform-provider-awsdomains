@@ -189,6 +189,7 @@ func TestResourceSchema(t *testing.T) {
 		"expiration_date",
 		"creation_date",
 		"registration_timeout",
+		"registration_operation_id",
 		"hosted_zone_id",
 	}
 
@@ -687,6 +688,9 @@ func TestCreateKeepsStateWhenRegistrationStatusUnknown(t *testing.T) {
 	if got.Status.ValueString() != string(types.OperationStatusInProgress) {
 		t.Fatalf("status = %q, want %q", got.Status.ValueString(), types.OperationStatusInProgress)
 	}
+	if got.RegistrationOperationID.ValueString() != "op-123" {
+		t.Fatalf("registration_operation_id = %q, want %q", got.RegistrationOperationID.ValueString(), "op-123")
+	}
 }
 
 func TestCreateWarnsAndKeepsStateWhenDomainDetailRefreshFails(t *testing.T) {
@@ -740,11 +744,18 @@ func TestReadKeepsPendingRegistrationStateWhenDomainDetailFails(t *testing.T) {
 	ctx := context.Background()
 	state := testDomainModel(t, "example.com")
 	state.Status = tftypes.StringValue(string(types.OperationStatusInProgress))
+	state.RegistrationOperationID = tftypes.StringValue("op-123")
 
 	domainResource := &DomainRegistrationResource{
 		client: &MockRoute53DomainsClient{
 			GetDomainDetailFunc: func(context.Context, *route53domains.GetDomainDetailInput, ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
 				return nil, errMockAccessDenied
+			},
+			GetOperationDetailFunc: func(_ context.Context, params *route53domains.GetOperationDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error) {
+				if got := aws.ToString(params.OperationId); got != "op-123" {
+					t.Fatalf("operation ID = %q, want %q", got, "op-123")
+				}
+				return &route53domains.GetOperationDetailOutput{Status: types.OperationStatusInProgress}, nil
 			},
 		},
 	}
@@ -772,6 +783,46 @@ func TestReadKeepsPendingRegistrationStateWhenDomainDetailFails(t *testing.T) {
 	}
 	if got.Status.ValueString() != string(types.OperationStatusInProgress) {
 		t.Fatalf("status = %q, want %q", got.Status.ValueString(), types.OperationStatusInProgress)
+	}
+}
+
+func TestReadRemovesPendingRegistrationStateWhenOperationFails(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	state.Status = tftypes.StringValue(string(types.OperationStatusInProgress))
+	state.RegistrationOperationID = tftypes.StringValue("op-123")
+
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			GetDomainDetailFunc: func(context.Context, *route53domains.GetDomainDetailInput, ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				return nil, errMockAccessDenied
+			},
+			GetOperationDetailFunc: func(_ context.Context, params *route53domains.GetOperationDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error) {
+				if got := aws.ToString(params.OperationId); got != "op-123" {
+					t.Fatalf("operation ID = %q, want %q", got, "op-123")
+				}
+				return &route53domains.GetOperationDetailOutput{
+					Status:  types.OperationStatusFailed,
+					Message: aws.String("registration rejected"),
+				}, nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceReadRequest(t, schema, state)
+	resp := &resource.ReadResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Read(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read returned error diagnostics: %v", resp.Diagnostics)
+	}
+	if len(resp.Diagnostics) == 0 {
+		t.Fatal("expected warning diagnostic for failed registration operation")
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Fatalf("state was not removed after failed registration operation: %s", resp.State.Raw.String())
 	}
 }
 
@@ -977,26 +1028,27 @@ func testDomainModel(t *testing.T, domainName string) DomainRegistrationResource
 	t.Helper()
 
 	return DomainRegistrationResourceModel{
-		ID:                  tftypes.StringValue(domainName),
-		DomainName:          tftypes.StringValue(domainName),
-		DurationYears:       tftypes.Int64Value(1),
-		AutoRenew:           tftypes.BoolValue(false),
-		AdminContact:        testContactModel("admin@example.com"),
-		RegistrantContact:   testContactModel("registrant@example.com"),
-		TechContact:         testContactModel("tech@example.com"),
-		AdminPrivacy:        tftypes.BoolValue(true),
-		RegistrantPrivacy:   tftypes.BoolValue(true),
-		TechPrivacy:         tftypes.BoolValue(true),
-		Nameservers:         stringListValue(t, "ns1.example.com", "ns2.example.com"),
-		Tags:                emptyFrameworkStringMap(),
-		TagsAll:             emptyFrameworkStringMap(),
-		AllowDelete:         tftypes.BoolValue(false),
-		DeleteHostedZone:    tftypes.BoolValue(false),
-		Status:              tftypes.StringValue("ok"),
-		ExpirationDate:      tftypes.StringValue(time.Now().AddDate(1, 0, 0).Format(time.RFC3339)),
-		CreationDate:        tftypes.StringValue(time.Now().Format(time.RFC3339)),
-		RegistrationTimeout: tftypes.Int64Value(900),
-		HostedZoneID:        tftypes.StringNull(),
+		ID:                      tftypes.StringValue(domainName),
+		DomainName:              tftypes.StringValue(domainName),
+		DurationYears:           tftypes.Int64Value(1),
+		AutoRenew:               tftypes.BoolValue(false),
+		AdminContact:            testContactModel("admin@example.com"),
+		RegistrantContact:       testContactModel("registrant@example.com"),
+		TechContact:             testContactModel("tech@example.com"),
+		AdminPrivacy:            tftypes.BoolValue(true),
+		RegistrantPrivacy:       tftypes.BoolValue(true),
+		TechPrivacy:             tftypes.BoolValue(true),
+		Nameservers:             stringListValue(t, "ns1.example.com", "ns2.example.com"),
+		Tags:                    emptyFrameworkStringMap(),
+		TagsAll:                 emptyFrameworkStringMap(),
+		AllowDelete:             tftypes.BoolValue(false),
+		DeleteHostedZone:        tftypes.BoolValue(false),
+		Status:                  tftypes.StringValue("ok"),
+		ExpirationDate:          tftypes.StringValue(time.Now().AddDate(1, 0, 0).Format(time.RFC3339)),
+		CreationDate:            tftypes.StringValue(time.Now().Format(time.RFC3339)),
+		RegistrationTimeout:     tftypes.Int64Value(900),
+		RegistrationOperationID: tftypes.StringNull(),
+		HostedZoneID:            tftypes.StringNull(),
 	}
 }
 
