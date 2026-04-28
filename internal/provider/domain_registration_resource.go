@@ -12,6 +12,7 @@ import (
 	route53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
 	"github.com/aws/aws-sdk-go-v2/service/route53domains"
 	"github.com/aws/aws-sdk-go-v2/service/route53domains/types"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -86,26 +87,26 @@ type ContactModel struct {
 
 // DomainRegistrationResourceModel stores Terraform state for the domain resource.
 type DomainRegistrationResourceModel struct {
-	ID                  tftypes.String   `tfsdk:"id"`
-	DomainName          tftypes.String   `tfsdk:"domain_name"`
-	DurationYears       tftypes.Int64    `tfsdk:"duration_years"`
-	AutoRenew           tftypes.Bool     `tfsdk:"auto_renew"`
-	AdminContact        *ContactModel    `tfsdk:"admin_contact"`
-	RegistrantContact   *ContactModel    `tfsdk:"registrant_contact"`
-	TechContact         *ContactModel    `tfsdk:"tech_contact"`
-	AdminPrivacy        tftypes.Bool     `tfsdk:"admin_privacy"`
-	RegistrantPrivacy   tftypes.Bool     `tfsdk:"registrant_privacy"`
-	TechPrivacy         tftypes.Bool     `tfsdk:"tech_privacy"`
-	Nameservers         []tftypes.String `tfsdk:"nameservers"`
-	Tags                tftypes.Map      `tfsdk:"tags"`
-	TagsAll             tftypes.Map      `tfsdk:"tags_all"`
-	AllowDelete         tftypes.Bool     `tfsdk:"allow_delete"`
-	DeleteHostedZone    tftypes.Bool     `tfsdk:"delete_hosted_zone"`
-	Status              tftypes.String   `tfsdk:"status"`
-	ExpirationDate      tftypes.String   `tfsdk:"expiration_date"`
-	CreationDate        tftypes.String   `tfsdk:"creation_date"`
-	RegistrationTimeout tftypes.Int64    `tfsdk:"registration_timeout"`
-	HostedZoneID        tftypes.String   `tfsdk:"hosted_zone_id"`
+	ID                  tftypes.String `tfsdk:"id"`
+	DomainName          tftypes.String `tfsdk:"domain_name"`
+	DurationYears       tftypes.Int64  `tfsdk:"duration_years"`
+	AutoRenew           tftypes.Bool   `tfsdk:"auto_renew"`
+	AdminContact        *ContactModel  `tfsdk:"admin_contact"`
+	RegistrantContact   *ContactModel  `tfsdk:"registrant_contact"`
+	TechContact         *ContactModel  `tfsdk:"tech_contact"`
+	AdminPrivacy        tftypes.Bool   `tfsdk:"admin_privacy"`
+	RegistrantPrivacy   tftypes.Bool   `tfsdk:"registrant_privacy"`
+	TechPrivacy         tftypes.Bool   `tfsdk:"tech_privacy"`
+	Nameservers         tftypes.List   `tfsdk:"nameservers"`
+	Tags                tftypes.Map    `tfsdk:"tags"`
+	TagsAll             tftypes.Map    `tfsdk:"tags_all"`
+	AllowDelete         tftypes.Bool   `tfsdk:"allow_delete"`
+	DeleteHostedZone    tftypes.Bool   `tfsdk:"delete_hosted_zone"`
+	Status              tftypes.String `tfsdk:"status"`
+	ExpirationDate      tftypes.String `tfsdk:"expiration_date"`
+	CreationDate        tftypes.String `tfsdk:"creation_date"`
+	RegistrationTimeout tftypes.Int64  `tfsdk:"registration_timeout"`
+	HostedZoneID        tftypes.String `tfsdk:"hosted_zone_id"`
 }
 
 // NewDomainRegistrationResource creates the domain registration resource.
@@ -332,6 +333,31 @@ func contactModelToAWS(m *ContactModel) *types.ContactDetail {
 	}
 
 	return contact
+}
+
+func frameworkListToAWSNameservers(ctx context.Context, value tftypes.List) ([]types.Nameserver, diag.Diagnostics) {
+	var nameserverNames []string
+	if value.IsNull() || value.IsUnknown() {
+		return nil, nil
+	}
+
+	diags := value.ElementsAs(ctx, &nameserverNames, false)
+	if diags.HasError() {
+		return nil, diags
+	}
+
+	nameservers := make([]types.Nameserver, 0, len(nameserverNames))
+	for _, nameserverName := range nameserverNames {
+		nameservers = append(nameservers, types.Nameserver{
+			Name: aws.String(nameserverName),
+		})
+	}
+
+	return nameservers, diags
+}
+
+func stringSliceToFrameworkList(ctx context.Context, values []string) (tftypes.List, diag.Diagnostics) {
+	return tftypes.ListValueFrom(ctx, tftypes.StringType, values)
 }
 
 func isExactHostedZoneName(zoneName, domainName string) bool {
@@ -672,15 +698,12 @@ func (r *DomainRegistrationResource) Create(ctx context.Context, req resource.Cr
 		return
 	}
 
-	// Update nameservers if specified
-	if len(data.Nameservers) > 0 {
-		var nameservers []types.Nameserver
-		for _, ns := range data.Nameservers {
-			nameservers = append(nameservers, types.Nameserver{
-				Name: aws.String(ns.ValueString()),
-			})
-		}
-
+	nameservers, diags := frameworkListToAWSNameservers(ctx, data.Nameservers)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if len(nameservers) > 0 {
 		_, err := r.client.UpdateDomainNameservers(ctx, &route53domains.UpdateDomainNameserversInput{
 			DomainName:  aws.String(domainName),
 			Nameservers: nameservers,
@@ -799,11 +822,16 @@ func (r *DomainRegistrationResource) Read(ctx context.Context, req resource.Read
 
 	// Update nameservers from AWS
 	if len(domainDetail.Nameservers) > 0 {
-		var nameservers []tftypes.String
+		nameservers := make([]string, 0, len(domainDetail.Nameservers))
 		for _, ns := range domainDetail.Nameservers {
-			nameservers = append(nameservers, tftypes.StringValue(aws.ToString(ns.Name)))
+			nameservers = append(nameservers, aws.ToString(ns.Name))
 		}
-		data.Nameservers = nameservers
+		nameserversList, diags := stringSliceToFrameworkList(ctx, nameservers)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		data.Nameservers = nameserversList
 	}
 
 	remoteTags, err := r.listDomainTags(ctx, domainName)
@@ -909,15 +937,12 @@ func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.Up
 		}
 	}
 
-	// Update nameservers if changed
-	if len(data.Nameservers) > 0 {
-		var nameservers []types.Nameserver
-		for _, ns := range data.Nameservers {
-			nameservers = append(nameservers, types.Nameserver{
-				Name: aws.String(ns.ValueString()),
-			})
-		}
-
+	nameservers, diags := frameworkListToAWSNameservers(ctx, data.Nameservers)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if len(nameservers) > 0 {
 		_, err := r.client.UpdateDomainNameservers(ctx, &route53domains.UpdateDomainNameserversInput{
 			DomainName:  aws.String(domainName),
 			Nameservers: nameservers,

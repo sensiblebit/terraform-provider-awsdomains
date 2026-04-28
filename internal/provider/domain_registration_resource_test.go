@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -99,6 +100,16 @@ func TestResourceSchema(t *testing.T) {
 		if _, ok := resp.Schema.Attributes[attr]; !ok {
 			t.Errorf("Schema missing '%s' attribute", attr)
 		}
+	}
+}
+
+func TestResourceModelNameserversAcceptsUnknownList(t *testing.T) {
+	field, ok := reflect.TypeFor[DomainRegistrationResourceModel]().FieldByName("Nameservers")
+	if !ok {
+		t.Fatal("DomainRegistrationResourceModel missing Nameservers field")
+	}
+	if got, want := field.Type, reflect.TypeFor[tftypes.List](); got != want {
+		t.Fatalf("Nameservers field type = %s, want %s", got, want)
 	}
 }
 
@@ -201,6 +212,41 @@ func TestContactTypeDefault(t *testing.T) {
 	result := contactModelToAWS(input)
 	if result.ContactType != types.ContactTypePerson {
 		t.Errorf("Expected default ContactType 'PERSON', got '%s'", result.ContactType)
+	}
+}
+
+func TestFrameworkListToAWSNameservers(t *testing.T) {
+	ctx := context.Background()
+	input, diags := tftypes.ListValueFrom(ctx, tftypes.StringType, []string{
+		"ns1.example.com",
+		"ns2.example.com",
+	})
+	if diags.HasError() {
+		t.Fatalf("creating nameserver list returned diagnostics: %v", diags)
+	}
+
+	got, diags := frameworkListToAWSNameservers(ctx, input)
+	if diags.HasError() {
+		t.Fatalf("frameworkListToAWSNameservers returned diagnostics: %v", diags)
+	}
+	if len(got) != 2 {
+		t.Fatalf("nameserver count = %d, want 2", len(got))
+	}
+	if aws.ToString(got[0].Name) != "ns1.example.com" {
+		t.Fatalf("first nameserver = %q, want %q", aws.ToString(got[0].Name), "ns1.example.com")
+	}
+	if aws.ToString(got[1].Name) != "ns2.example.com" {
+		t.Fatalf("second nameserver = %q, want %q", aws.ToString(got[1].Name), "ns2.example.com")
+	}
+}
+
+func TestFrameworkListToAWSNameserversAllowsUnknownList(t *testing.T) {
+	got, diags := frameworkListToAWSNameservers(context.Background(), tftypes.ListUnknown(tftypes.StringType))
+	if diags.HasError() {
+		t.Fatalf("frameworkListToAWSNameservers returned diagnostics: %v", diags)
+	}
+	if got != nil {
+		t.Fatalf("nameservers = %#v, want nil", got)
 	}
 }
 
