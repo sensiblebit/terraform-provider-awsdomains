@@ -23,11 +23,22 @@ terraform {
 provider "awsdomains" {
   region  = "us-east-1"
   profile = "default"
+
+  default_tags {
+    tags = {
+      Environment = "prod"
+      ManagedBy   = "terraform"
+    }
+  }
 }
 
 resource "awsdomains_domain" "example" {
   domain_name    = "example.com"
   duration_years = 1
+
+  tags = {
+    Name = "example.com"
+  }
 
   admin_contact = {
     first_name     = "John"
@@ -70,6 +81,16 @@ The provider uses the AWS SDK for Go v2 and supports the standard AWS authentica
 - `region` (String) AWS region. Must be `us-east-1` as Route53 Domains only operates in this region. Defaults to `us-east-1`.
 - `profile` (String) AWS profile name from shared credentials file.
 
+### Optional Blocks
+
+- `default_tags` (Block) Default tags to apply to all taggable resources managed by this provider.
+
+#### default_tags
+
+- `tags` (Map of String) Default tag keys and values. Resource-level tags override default tags with the same key.
+
+Route53 Domains allows up to 50 merged provider and resource tags. Tag keys must be 1-128 characters, values must be 0-256 characters, and both may contain only letters, numbers, spaces, and `. : / = + - @`. The provider preserves unmanaged remote tags and only deletes keys that were previously tracked through `default_tags` or resource-level `tags`.
+
 ## Required IAM Permissions
 
 ```json
@@ -89,6 +110,9 @@ The provider uses the AWS SDK for Go v2 and supports the standard AWS authentica
         "route53domains:DisableDomainAutoRenew",
         "route53domains:DeleteDomain",
         "route53domains:ListDomains",
+        "route53domains:ListTagsForDomain",
+        "route53domains:UpdateTagsForDomain",
+        "route53domains:DeleteTagsForDomain",
         "route53domains:CheckDomainAvailability",
         "route53domains:ListPrices",
         "route53:ListHostedZonesByName",

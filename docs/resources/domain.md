@@ -21,6 +21,11 @@ resource "awsdomains_domain" "example" {
   duration_years = 1
   auto_renew     = false
 
+  tags = {
+    Name        = "example.com"
+    Environment = "prod"
+  }
+
   admin_contact = {
     first_name     = "John"
     last_name      = "Doe"
@@ -111,6 +116,33 @@ resource "awsdomains_domain" "example" {
 }
 ```
 
+### With Tags
+
+Provider-level `default_tags` are applied to the domain and can be overridden by resource-level `tags` with the same key. The computed `tags_all` attribute contains the merged result.
+
+```terraform
+provider "awsdomains" {
+  region = "us-east-1"
+
+  default_tags {
+    tags = {
+      Environment = "shared"
+      ManagedBy   = "terraform"
+    }
+  }
+}
+
+resource "awsdomains_domain" "example" {
+  domain_name = "example.com"
+  # ... contacts ...
+
+  tags = {
+    Name        = "example.com"
+    Environment = "prod"
+  }
+}
+```
+
 ### Using External DNS (Delete Hosted Zone)
 
 When using external DNS providers (Cloudflare, etc.), delete the auto-created hosted zone:
@@ -147,7 +179,8 @@ resource "awsdomains_domain" "example" {
 - `admin_privacy` (Boolean) Enable WHOIS privacy for admin contact. Defaults to `true`.
 - `registrant_privacy` (Boolean) Enable WHOIS privacy for registrant contact. Defaults to `true`.
 - `tech_privacy` (Boolean) Enable WHOIS privacy for tech contact. Defaults to `true`.
-- `nameservers` (List of String) Custom nameservers for the domain.
+- `nameservers` (List of String) Custom nameservers for the domain. If omitted, AWS-assigned Route53 Domains nameservers are stored in state. Clearing nameservers is not supported; set a replacement list instead.
+- `tags` (Map of String) Resource-level tags for the domain. These override provider `default_tags` with the same key. Route53 Domains allows up to 50 merged tags; keys must be 1-128 characters, values must be 0-256 characters, and both may contain only letters, numbers, spaces, and `. : / = + - @`. Unmanaged remote tags are preserved.
 - `allow_delete` (Boolean) Allow actual domain deletion on `terraform destroy`. Defaults to `false`.
 - `delete_hosted_zone` (Boolean) Delete the auto-created Route53 hosted zone after registration. Use when pointing to external DNS. Only deletes if zone is public, has registrar comment, and contains only NS/SOA records. Defaults to `false`.
 - `registration_timeout` (Number) Timeout in seconds for domain registration. Defaults to `900`.
@@ -158,6 +191,8 @@ resource "awsdomains_domain" "example" {
 - `status` (String) Current status of the domain.
 - `creation_date` (String) Domain creation date in RFC3339 format.
 - `expiration_date` (String) Domain expiration date in RFC3339 format.
+- `tags_all` (Map of String) Tags managed by this provider, including provider `default_tags` and resource-level `tags`.
+- `registration_operation_id` (String) Route53 Domains operation ID returned by the registration request.
 - `hosted_zone_id` (String) The Route53 hosted zone ID automatically created for this domain.
 
 <a id="nestedatt--contact"></a>
@@ -189,4 +224,4 @@ Domains can be imported using the domain name:
 terraform import awsdomains_domain.example example.com
 ```
 
-~> **Note:** Contact information is not populated during import. After importing, run `terraform apply` to set contact details from your configuration.
+~> **Note:** Import sets `domain_name` and `id`; the next refresh populates domain details, contacts, privacy settings, nameservers, and tracked tags from Route53 Domains.

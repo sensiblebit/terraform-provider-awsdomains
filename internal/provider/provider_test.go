@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/provider"
+	providerschema "github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 )
@@ -36,6 +37,28 @@ func TestProviderSchema(t *testing.T) {
 	}
 	if _, ok := attrs["profile"]; !ok {
 		t.Error("Schema missing 'profile' attribute")
+	}
+	defaultTagsBlock, ok := resp.Schema.Blocks["default_tags"]
+	if !ok {
+		t.Error("Schema missing 'default_tags' block")
+	}
+	defaultTagsNestedBlock, ok := defaultTagsBlock.(providerschema.SingleNestedBlock)
+	if !ok {
+		t.Fatalf("Schema 'default_tags' block has type %T, want schema.SingleNestedBlock", defaultTagsBlock)
+	}
+	defaultTagsTagsAttr, ok := defaultTagsNestedBlock.Attributes["tags"]
+	if !ok {
+		t.Fatal("Schema 'default_tags' block missing 'tags' attribute")
+	}
+	defaultTagsTagsMapAttr, ok := defaultTagsTagsAttr.(providerschema.MapAttribute)
+	if !ok {
+		t.Fatalf("Schema 'default_tags.tags' attribute has type %T, want schema.MapAttribute", defaultTagsTagsAttr)
+	}
+	if !defaultTagsTagsMapAttr.Optional {
+		t.Error("Schema 'default_tags.tags' attribute must be optional")
+	}
+	if defaultTagsTagsMapAttr.Required {
+		t.Error("Schema 'default_tags.tags' attribute must not be required")
 	}
 }
 

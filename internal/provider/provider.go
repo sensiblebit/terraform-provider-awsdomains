@@ -8,6 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/route53"
 	"github.com/aws/aws-sdk-go-v2/service/route53domains"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -15,6 +16,7 @@ import (
 )
 
 var _ provider.Provider = &AWSDomainsProvider{}
+var _ provider.ProviderWithValidateConfig = &AWSDomainsProvider{}
 
 // AWSDomainsProvider implements the Terraform provider entrypoint.
 type AWSDomainsProvider struct {
@@ -23,14 +25,21 @@ type AWSDomainsProvider struct {
 
 // AWSDomainsProviderModel stores provider configuration values.
 type AWSDomainsProviderModel struct {
-	Region  types.String `tfsdk:"region"`
-	Profile types.String `tfsdk:"profile"`
+	Region      types.String      `tfsdk:"region"`
+	Profile     types.String      `tfsdk:"profile"`
+	DefaultTags *DefaultTagsModel `tfsdk:"default_tags"`
+}
+
+// DefaultTagsModel stores provider default tags configuration.
+type DefaultTagsModel struct {
+	Tags types.Map `tfsdk:"tags"`
 }
 
 // providerData holds the AWS clients passed to resources and data sources.
 type providerData struct {
 	DomainsClient *route53domains.Client
 	Route53Client *route53.Client
+	DefaultTags   map[string]string
 }
 
 // New returns a provider factory for Terraform.
@@ -62,7 +71,41 @@ func (p *AWSDomainsProvider) Schema(_ context.Context, _ provider.SchemaRequest,
 				Optional:    true,
 			},
 		},
+		Blocks: map[string]schema.Block{
+			"default_tags": schema.SingleNestedBlock{
+				Description: "Default tags to apply to all taggable resources managed by this provider.",
+				Attributes: map[string]schema.Attribute{
+					"tags": schema.MapAttribute{
+						Optional:    true,
+						ElementType: types.StringType,
+						Description: "Map of default tag keys and values. Resource-level tags override default tags with the same key.",
+					},
+				},
+			},
+		},
 	}
+}
+
+// ValidateConfig validates provider-level configuration before AWS clients are configured.
+func (p *AWSDomainsProvider) ValidateConfig(ctx context.Context, req provider.ValidateConfigRequest, resp *provider.ValidateConfigResponse) {
+	var data AWSDomainsProviderModel
+
+	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if data.DefaultTags == nil || !frameworkMapElementsKnown(data.DefaultTags.Tags) {
+		return
+	}
+
+	defaultTags, diags := frameworkMapToStringMap(ctx, data.DefaultTags.Tags)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	addTagValidationDiagnostics(&resp.Diagnostics, path.Root("default_tags").AtName("tags"), defaultTags)
 }
 
 // Configure creates AWS service clients and shares them with resources and data sources.
@@ -88,6 +131,20 @@ func (p *AWSDomainsProvider) Configure(ctx context.Context, req provider.Configu
 		optFns = append(optFns, config.WithSharedConfigProfile(data.Profile.ValueString()))
 	}
 
+	defaultTags := map[string]string{}
+	if data.DefaultTags != nil {
+		convertedDefaultTags, diags := frameworkMapToStringMap(ctx, data.DefaultTags.Tags)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		addTagValidationDiagnostics(&resp.Diagnostics, path.Root("default_tags").AtName("tags"), convertedDefaultTags)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		defaultTags = convertedDefaultTags
+	}
+
 	cfg, err := config.LoadDefaultConfig(ctx, optFns...)
 	if err != nil {
 		resp.Diagnostics.AddError(
@@ -103,6 +160,7 @@ func (p *AWSDomainsProvider) Configure(ctx context.Context, req provider.Configu
 	providerData := &providerData{
 		DomainsClient: domainsClient,
 		Route53Client: route53Client,
+		DefaultTags:   defaultTags,
 	}
 
 	resp.DataSourceData = providerData

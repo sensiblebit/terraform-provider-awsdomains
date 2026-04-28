@@ -32,6 +32,8 @@ jobs:
           cache: true
       - run: go mod download
       - run: go test -v ./...
+      - name: Resource plan tests
+        run: TF_ACC=1 go test -v ./internal/provider -run 'TestAccDomainRegistration' -timeout 10m
 
   lint:
     name: Lint

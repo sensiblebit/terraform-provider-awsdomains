@@ -10,6 +10,12 @@ terraform {
 provider "awsdomains" {
   region  = "us-east-1"
   profile = "default"
+
+  default_tags {
+    tags = {
+      ManagedBy = "terraform"
+    }
+  }
 }
 
 variable "domain_name" {
@@ -26,6 +32,10 @@ resource "awsdomains_domain" "example" {
   domain_name    = var.domain_name
   duration_years = 1
   auto_renew     = false
+
+  tags = {
+    Name = var.domain_name
+  }
 
   admin_contact = {
     first_name     = "John"
