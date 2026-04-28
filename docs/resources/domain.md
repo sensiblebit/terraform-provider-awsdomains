@@ -179,8 +179,8 @@ resource "awsdomains_domain" "example" {
 - `admin_privacy` (Boolean) Enable WHOIS privacy for admin contact. Defaults to `true`.
 - `registrant_privacy` (Boolean) Enable WHOIS privacy for registrant contact. Defaults to `true`.
 - `tech_privacy` (Boolean) Enable WHOIS privacy for tech contact. Defaults to `true`.
-- `nameservers` (List of String) Custom nameservers for the domain.
-- `tags` (Map of String) Resource-level tags for the domain. These override provider `default_tags` with the same key. Route53 Domains allows up to 50 merged tags; keys must be 1-128 characters, values must be 0-256 characters, and both may contain only letters, numbers, spaces, and `. : / = + - @`.
+- `nameservers` (List of String) Custom nameservers for the domain. If omitted, AWS-assigned Route53 Domains nameservers are stored in state. Clearing nameservers is not supported; set a replacement list instead.
+- `tags` (Map of String) Resource-level tags for the domain. These override provider `default_tags` with the same key. Route53 Domains allows up to 50 merged tags; keys must be 1-128 characters, values must be 0-256 characters, and both may contain only letters, numbers, spaces, and `. : / = + - @`. Unmanaged remote tags are preserved.
 - `allow_delete` (Boolean) Allow actual domain deletion on `terraform destroy`. Defaults to `false`.
 - `delete_hosted_zone` (Boolean) Delete the auto-created Route53 hosted zone after registration. Use when pointing to external DNS. Only deletes if zone is public, has registrar comment, and contains only NS/SOA records. Defaults to `false`.
 - `registration_timeout` (Number) Timeout in seconds for domain registration. Defaults to `900`.
@@ -191,7 +191,7 @@ resource "awsdomains_domain" "example" {
 - `status` (String) Current status of the domain.
 - `creation_date` (String) Domain creation date in RFC3339 format.
 - `expiration_date` (String) Domain expiration date in RFC3339 format.
-- `tags_all` (Map of String) All tags applied to the domain, including provider `default_tags` and resource-level `tags`.
+- `tags_all` (Map of String) Tags managed by this provider, including provider `default_tags` and resource-level `tags`.
 - `hosted_zone_id` (String) The Route53 hosted zone ID automatically created for this domain.
 
 <a id="nestedatt--contact"></a>

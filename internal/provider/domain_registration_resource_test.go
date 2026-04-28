@@ -197,6 +197,17 @@ func TestResourceSchema(t *testing.T) {
 			t.Errorf("Schema missing '%s' attribute", attr)
 		}
 	}
+
+	nameserversAttr, ok := resp.Schema.Attributes["nameservers"].(resourceschema.ListAttribute)
+	if !ok {
+		t.Fatalf("nameservers attribute has type %T, want schema.ListAttribute", resp.Schema.Attributes["nameservers"])
+	}
+	if !nameserversAttr.Optional {
+		t.Fatal("nameservers attribute must be optional")
+	}
+	if !nameserversAttr.Computed {
+		t.Fatal("nameservers attribute must be computed because Read stores AWS nameservers in state")
+	}
 }
 
 func TestResourceModelNameserversAcceptsUnknownList(t *testing.T) {
@@ -611,6 +622,256 @@ func TestCreateWarnsAndKeepsStateWhenPostRegistrationTagSyncFails(t *testing.T) 
 	}
 	if got.ID.ValueString() != "example.com" {
 		t.Fatalf("id = %q, want %q", got.ID.ValueString(), "example.com")
+	}
+}
+
+func TestCreateKeepsStateWhenRegistrationStatusUnknown(t *testing.T) {
+	ctx := context.Background()
+	plan := testDomainModel(t, "example.com")
+	plan.RegistrationTimeout = tftypes.Int64Value(0)
+	plan.Nameservers = tftypes.ListNull(tftypes.StringType)
+
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			RegisterDomainFunc: func(_ context.Context, _ *route53domains.RegisterDomainInput, _ ...func(*route53domains.Options)) (*route53domains.RegisterDomainOutput, error) {
+				return &route53domains.RegisterDomainOutput{OperationId: aws.String("op-123")}, nil
+			},
+			GetOperationDetailFunc: func(_ context.Context, _ *route53domains.GetOperationDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error) {
+				return &route53domains.GetOperationDetailOutput{Status: types.OperationStatusInProgress}, nil
+			},
+			UpdateTagsForDomainFunc: func(context.Context, *route53domains.UpdateTagsForDomainInput, ...func(*route53domains.Options)) (*route53domains.UpdateTagsForDomainOutput, error) {
+				t.Fatal("UpdateTagsForDomain must not be called until registration completion is confirmed")
+				return nil, errUnexpectedMockRoute53DomainsCall
+			},
+			UpdateDomainNameserversFunc: func(context.Context, *route53domains.UpdateDomainNameserversInput, ...func(*route53domains.Options)) (*route53domains.UpdateDomainNameserversOutput, error) {
+				t.Fatal("UpdateDomainNameservers must not be called until registration completion is confirmed")
+				return nil, errUnexpectedMockRoute53DomainsCall
+			},
+			GetDomainDetailFunc: func(context.Context, *route53domains.GetDomainDetailInput, ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				t.Fatal("GetDomainDetail must not be called until registration completion is confirmed")
+				return nil, errUnexpectedMockRoute53DomainsCall
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceCreateRequest(t, schema, plan)
+	resp := &resource.CreateResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Create(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create returned error diagnostics: %v", resp.Diagnostics)
+	}
+	if len(resp.Diagnostics) == 0 {
+		t.Fatal("expected warning diagnostic for unknown registration status")
+	}
+
+	var got DomainRegistrationResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("reading response state returned diagnostics: %v", resp.Diagnostics)
+	}
+	if got.ID.ValueString() != "example.com" {
+		t.Fatalf("id = %q, want %q", got.ID.ValueString(), "example.com")
+	}
+	if got.Status.ValueString() != string(types.OperationStatusInProgress) {
+		t.Fatalf("status = %q, want %q", got.Status.ValueString(), types.OperationStatusInProgress)
+	}
+}
+
+func TestCreateWarnsAndKeepsStateWhenDomainDetailRefreshFails(t *testing.T) {
+	ctx := context.Background()
+	plan := testDomainModel(t, "example.com")
+	plan.Nameservers = tftypes.ListNull(tftypes.StringType)
+
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			RegisterDomainFunc: func(_ context.Context, _ *route53domains.RegisterDomainInput, _ ...func(*route53domains.Options)) (*route53domains.RegisterDomainOutput, error) {
+				return &route53domains.RegisterDomainOutput{OperationId: aws.String("op-123")}, nil
+			},
+			GetOperationDetailFunc: func(_ context.Context, _ *route53domains.GetOperationDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error) {
+				return &route53domains.GetOperationDetailOutput{Status: types.OperationStatusSuccessful}, nil
+			},
+			GetDomainDetailFunc: func(context.Context, *route53domains.GetDomainDetailInput, ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				return nil, errMockAccessDenied
+			},
+		},
+		route53Client: &MockRoute53Client{
+			ListHostedZonesByNameFunc: func(context.Context, *route53.ListHostedZonesByNameInput, ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error) {
+				return &route53.ListHostedZonesByNameOutput{}, nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceCreateRequest(t, schema, plan)
+	resp := &resource.CreateResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Create(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create returned error diagnostics: %v", resp.Diagnostics)
+	}
+	if len(resp.Diagnostics) == 0 {
+		t.Fatal("expected warning diagnostic for failed detail refresh")
+	}
+
+	var got DomainRegistrationResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("reading response state returned diagnostics: %v", resp.Diagnostics)
+	}
+	if got.ID.ValueString() != "example.com" {
+		t.Fatalf("id = %q, want %q", got.ID.ValueString(), "example.com")
+	}
+}
+
+func TestUpdateWaitsForNameserverOperationBeforeRefreshingState(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	plan := state
+	plan.Nameservers = stringListValue(t, "ns3.example.com", "ns4.example.com")
+
+	waitedForOperation := false
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			UpdateDomainNameserversFunc: func(_ context.Context, _ *route53domains.UpdateDomainNameserversInput, _ ...func(*route53domains.Options)) (*route53domains.UpdateDomainNameserversOutput, error) {
+				return &route53domains.UpdateDomainNameserversOutput{OperationId: aws.String("op-ns")}, nil
+			},
+			GetOperationDetailFunc: func(_ context.Context, params *route53domains.GetOperationDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error) {
+				if got := aws.ToString(params.OperationId); got != "op-ns" {
+					t.Fatalf("operation ID = %q, want %q", got, "op-ns")
+				}
+				waitedForOperation = true
+				return &route53domains.GetOperationDetailOutput{Status: types.OperationStatusSuccessful}, nil
+			},
+			GetDomainDetailFunc: func(_ context.Context, _ *route53domains.GetDomainDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				if !waitedForOperation {
+					t.Fatal("GetDomainDetail was called before the nameserver operation completed")
+				}
+				detail := MockDomainDetailResponse("example.com")
+				detail.Nameservers = []types.Nameserver{
+					{Name: aws.String("ns3.example.com")},
+					{Name: aws.String("ns4.example.com")},
+				}
+				return detail, nil
+			},
+		},
+		route53Client: &MockRoute53Client{
+			ListHostedZonesByNameFunc: func(context.Context, *route53.ListHostedZonesByNameInput, ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error) {
+				return &route53.ListHostedZonesByNameOutput{}, nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceUpdateRequest(t, schema, plan, state)
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Update(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update returned diagnostics: %v", resp.Diagnostics)
+	}
+	if !waitedForOperation {
+		t.Fatal("GetOperationDetail was not called")
+	}
+}
+
+func TestUpdateReturnsErrorWhenNameserverOperationFails(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	plan := state
+	plan.Nameservers = stringListValue(t, "ns3.example.com", "ns4.example.com")
+
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			UpdateDomainNameserversFunc: func(_ context.Context, _ *route53domains.UpdateDomainNameserversInput, _ ...func(*route53domains.Options)) (*route53domains.UpdateDomainNameserversOutput, error) {
+				return &route53domains.UpdateDomainNameserversOutput{OperationId: aws.String("op-ns")}, nil
+			},
+			GetOperationDetailFunc: func(_ context.Context, _ *route53domains.GetOperationDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error) {
+				return &route53domains.GetOperationDetailOutput{
+					Status:  types.OperationStatusFailed,
+					Message: aws.String("pending customer action"),
+				}, nil
+			},
+			GetDomainDetailFunc: func(context.Context, *route53domains.GetDomainDetailInput, ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				t.Fatal("GetDomainDetail must not be called after operation failure")
+				return nil, errUnexpectedMockRoute53DomainsCall
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceUpdateRequest(t, schema, plan, state)
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Update(ctx, req, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected operation failure diagnostic")
+	}
+}
+
+func TestUpdateTagReconcilePreservesUnmanagedRemoteTags(t *testing.T) {
+	ctx := context.Background()
+	state := testDomainModel(t, "example.com")
+	state.Tags = stringMapValue(t, map[string]string{
+		"Environment": "prod",
+		"OldManaged":  "remove",
+	})
+	state.TagsAll = stringMapValue(t, map[string]string{
+		"Environment": "prod",
+		"OldManaged":  "remove",
+	})
+
+	plan := state
+	plan.Tags = stringMapValue(t, map[string]string{"Environment": "prod"})
+	plan.TagsAll = stringMapValue(t, map[string]string{"Environment": "prod"})
+
+	deletedTags := []string{}
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			ListTagsForDomainFunc: func(_ context.Context, _ *route53domains.ListTagsForDomainInput, _ ...func(*route53domains.Options)) (*route53domains.ListTagsForDomainOutput, error) {
+				return &route53domains.ListTagsForDomainOutput{
+					TagList: []types.Tag{
+						{Key: aws.String("Environment"), Value: aws.String("prod")},
+						{Key: aws.String("OldManaged"), Value: aws.String("remove")},
+						{Key: aws.String("External"), Value: aws.String("console")},
+					},
+				}, nil
+			},
+			DeleteTagsForDomainFunc: func(_ context.Context, params *route53domains.DeleteTagsForDomainInput, _ ...func(*route53domains.Options)) (*route53domains.DeleteTagsForDomainOutput, error) {
+				deletedTags = append(deletedTags, params.TagsToDelete...)
+				return &route53domains.DeleteTagsForDomainOutput{}, nil
+			},
+			UpdateTagsForDomainFunc: func(context.Context, *route53domains.UpdateTagsForDomainInput, ...func(*route53domains.Options)) (*route53domains.UpdateTagsForDomainOutput, error) {
+				t.Fatal("UpdateTagsForDomain must not be called when desired managed tags already match")
+				return nil, errUnexpectedMockRoute53DomainsCall
+			},
+			GetDomainDetailFunc: func(_ context.Context, _ *route53domains.GetDomainDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				return MockDomainDetailResponse("example.com"), nil
+			},
+		},
+		route53Client: &MockRoute53Client{
+			ListHostedZonesByNameFunc: func(context.Context, *route53.ListHostedZonesByNameInput, ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error) {
+				return &route53.ListHostedZonesByNameOutput{}, nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceUpdateRequest(t, schema, plan, state)
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Update(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update returned diagnostics: %v", resp.Diagnostics)
+	}
+	if !reflect.DeepEqual(deletedTags, []string{"OldManaged"}) {
+		t.Fatalf("deleted tags = %#v, want %#v", deletedTags, []string{"OldManaged"})
 	}
 }
 

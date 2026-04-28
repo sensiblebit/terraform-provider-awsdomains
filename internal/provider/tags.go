@@ -170,11 +170,13 @@ func sortedTagKeys(tags map[string]string) []string {
 	return keys
 }
 
-func tagKeysToDelete(currentTags, desiredTags map[string]string) []string {
+func tagKeysToDelete(currentTags, desiredTags, previousManagedTags map[string]string) []string {
 	var keys []string
 	for key := range currentTags {
 		if _, ok := desiredTags[key]; !ok {
-			keys = append(keys, key)
+			if _, managed := previousManagedTags[key]; managed {
+				keys = append(keys, key)
+			}
 		}
 	}
 	sort.Strings(keys)
@@ -201,4 +203,30 @@ func resourceTagsFromRemote(remoteTags, priorResourceTags map[string]string) map
 	}
 
 	return resourceTags
+}
+
+func managedTagsFromRemote(remoteTags, managedTags map[string]string) map[string]string {
+	tags := map[string]string{}
+
+	for key := range managedTags {
+		if value, ok := remoteTags[key]; ok {
+			tags[key] = value
+		}
+	}
+
+	return tags
+}
+
+func trackedTagKeys(defaultTags, resourceTags, previousManagedTags map[string]string) map[string]string {
+	keys := make(map[string]string, len(defaultTags)+len(resourceTags)+len(previousManagedTags))
+	for key := range defaultTags {
+		keys[key] = ""
+	}
+	for key := range resourceTags {
+		keys[key] = ""
+	}
+	for key := range previousManagedTags {
+		keys[key] = ""
+	}
+	return keys
 }

@@ -39,7 +39,7 @@ func TestTagDiff(t *testing.T) {
 		"Create": "new",
 	}
 
-	if got, want := tagKeysToDelete(currentTags, desiredTags), []string{"Remove"}; !reflect.DeepEqual(got, want) {
+	if got, want := tagKeysToDelete(currentTags, desiredTags, currentTags), []string{"Remove"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("tagKeysToDelete() = %#v, want %#v", got, want)
 	}
 
@@ -50,6 +50,27 @@ func TestTagDiff(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotUpdates, wantUpdates) {
 		t.Fatalf("tagsToUpdate() = %#v, want %#v", gotUpdates, wantUpdates)
+	}
+}
+
+func TestTagKeysToDeletePreservesUnmanagedRemoteTags(t *testing.T) {
+	currentTags := map[string]string{
+		"External":   "console",
+		"OldManaged": "old",
+		"Keep":       "same",
+	}
+	desiredTags := map[string]string{
+		"Keep": "same",
+	}
+	previousManagedTags := map[string]string{
+		"OldManaged": "old",
+		"Keep":       "same",
+	}
+
+	got := tagKeysToDelete(currentTags, desiredTags, previousManagedTags)
+	want := []string{"OldManaged"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tagKeysToDelete() = %#v, want %#v", got, want)
 	}
 }
 
@@ -117,5 +138,23 @@ func TestResourceTagsFromRemoteIgnoresUntrackedRemoteTags(t *testing.T) {
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("resourceTagsFromRemote() = %#v, want %#v", got, want)
+	}
+}
+
+func TestManagedTagsFromRemoteKeepsOnlyTrackedKeys(t *testing.T) {
+	remoteTags := map[string]string{
+		"Environment": "prod",
+		"External":    "console",
+	}
+	managedTags := map[string]string{
+		"Environment": "",
+	}
+
+	got := managedTagsFromRemote(remoteTags, managedTags)
+	want := map[string]string{
+		"Environment": "prod",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("managedTagsFromRemote() = %#v, want %#v", got, want)
 	}
 }

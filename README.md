@@ -85,13 +85,13 @@ resource "aws_route53_record" "apex" {
 | `admin_privacy` | bool | No | `true` | WHOIS privacy for admin |
 | `registrant_privacy` | bool | No | `true` | WHOIS privacy for registrant |
 | `tech_privacy` | bool | No | `true` | WHOIS privacy for tech |
-| `nameservers` | list(string) | No | - | Custom nameservers |
+| `nameservers` | list(string) | No | AWS-assigned | Custom nameservers; computed from AWS when omitted |
 | `tags` | map(string) | No | `{}` | Resource-level tags; overrides provider default tags |
 | `allow_delete` | bool | No | `false` | Allow domain deletion on destroy |
 | `delete_hosted_zone` | bool | No | `false` | Delete auto-created hosted zone (for external DNS) |
 | `registration_timeout` | number | No | `900` | Timeout in seconds |
 
-Route53 Domains allows up to 50 merged provider and resource tags. Tag keys must be 1-128 characters, values must be 0-256 characters, and both may contain only letters, numbers, spaces, and `. : / = + - @`.
+Route53 Domains allows up to 50 merged provider and resource tags. Tag keys must be 1-128 characters, values must be 0-256 characters, and both may contain only letters, numbers, spaces, and `. : / = + - @`. The provider only deletes tags it previously managed, so console or other-provider tags are preserved unless they use a key managed by `default_tags` or resource-level `tags`.
 
 ### Attributes (Read-Only)
 
@@ -101,7 +101,7 @@ Route53 Domains allows up to 50 merged provider and resource tags. Tag keys must
 | `status` | Current domain status |
 | `creation_date` | Domain creation date (RFC3339) |
 | `expiration_date` | Domain expiration date (RFC3339) |
-| `tags_all` | All tags applied to the domain, including provider default tags |
+| `tags_all` | Tags managed by this provider, including provider default tags |
 | `hosted_zone_id` | Route53 hosted zone ID (auto-created by AWS) |
 
 ### Contact Object
@@ -212,10 +212,10 @@ Provider creates two clients via `providerData`:
 ### Create
 
 1. `RegisterDomain` API call
-2. Poll `GetOperationDetail` until `SUCCESSFUL` or timeout
+2. Poll `GetOperationDetail` until `SUCCESSFUL`; if status cannot be confirmed after submission, keep the domain in state and skip follow-up mutations so Terraform does not launch another registration
 3. `UpdateTagsForDomain` with merged provider/resource tags if any tags are configured; failures after successful registration are warned and retried on later applies instead of orphaning the paid domain
-4. `UpdateDomainNameservers` if specified; failures after successful registration are warned and retried on later applies
-5. `GetDomainDetail` to fetch computed fields
+4. `UpdateDomainNameservers` if specified, then wait for the returned operation ID; failures after successful registration are warned and retried on later applies
+5. `GetDomainDetail` to fetch computed fields; failures after successful registration are warned and the domain remains in state
 6. If `delete_hosted_zone = true`: safely delete the registrar-created zone
 7. Otherwise: `ListHostedZonesByName` to get hosted zone ID
 
@@ -223,16 +223,16 @@ Provider creates two clients via `providerData`:
 
 1. `GetDomainDetail` API call
 2. If error, removes resource from state (known issue - should distinguish 404)
-3. `ListTagsForDomain` to refresh `tags` and `tags_all` only when tags are configured or already tracked in state
+3. `ListTagsForDomain` to refresh managed `tags` and `tags_all` only when tags are configured or already tracked in state
 4. `ListHostedZonesByName` to refresh hosted zone ID
 
 ### Update
 
-1. If tags are configured or already tracked, `ListTagsForDomain`, then `UpdateTagsForDomain` / `DeleteTagsForDomain` to reconcile tags
+1. If tags are configured or already tracked, `ListTagsForDomain`, then `UpdateTagsForDomain` / `DeleteTagsForDomain` to reconcile managed tags while preserving unmanaged remote tags
 2. `EnableDomainAutoRenew` / `DisableDomainAutoRenew` if changed
-3. `UpdateDomainNameservers` if changed
-4. `UpdateDomainContact` for contact changes
-5. `UpdateDomainContactPrivacy` for privacy settings
+3. `UpdateDomainNameservers` if changed, then wait for the returned operation ID
+4. `UpdateDomainContact` for contact changes, then wait for the returned operation ID
+5. `UpdateDomainContactPrivacy` for privacy settings, then wait for the returned operation ID
 6. Refresh state via `GetDomainDetail`
 
 ### Delete
@@ -312,11 +312,13 @@ go test -v ./...
 TF_ACC=1 go test -v ./... -run 'TestAccDomain(Availability|Price)'
 ```
 
-**Full resource tests** (EXPENSIVE - registers real domains):
+**Resource plan tests** (safe, no domain registration):
 
 ```bash
 TF_ACC=1 go test -v ./... -run 'TestAccDomainRegistration' -timeout 30m
 ```
+
+The resource acceptance tests are plan-only by default. Do not add apply-based registration tests unless they are explicitly gated, because they register billable real domains.
 
 ### Mock Client Pattern
 

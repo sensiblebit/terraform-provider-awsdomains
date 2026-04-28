@@ -89,7 +89,7 @@ The provider uses the AWS SDK for Go v2 and supports the standard AWS authentica
 
 - `tags` (Map of String) Default tag keys and values. Resource-level tags override default tags with the same key.
 
-Route53 Domains allows up to 50 merged provider and resource tags. Tag keys must be 1-128 characters, values must be 0-256 characters, and both may contain only letters, numbers, spaces, and `. : / = + - @`.
+Route53 Domains allows up to 50 merged provider and resource tags. Tag keys must be 1-128 characters, values must be 0-256 characters, and both may contain only letters, numbers, spaces, and `. : / = + - @`. The provider preserves unmanaged remote tags and only deletes keys that were previously tracked through `default_tags` or resource-level `tags`.
 
 ## Required IAM Permissions
 
