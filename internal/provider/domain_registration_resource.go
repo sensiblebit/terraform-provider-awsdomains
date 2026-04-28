@@ -833,6 +833,7 @@ func (r *DomainRegistrationResource) populateDomainDetailState(ctx context.Conte
 		data.Nameservers = nameserversList
 	}
 
+	prepareRegisteredDomainState(data, domainName)
 	return diags
 }
 

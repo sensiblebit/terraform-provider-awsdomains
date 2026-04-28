@@ -746,6 +746,79 @@ func TestCreateWarnsAndKeepsStateWhenDomainDetailRefreshFails(t *testing.T) {
 	}
 }
 
+func TestCreateNormalizesUnknownComputedFieldsWhenDomainDetailSparse(t *testing.T) {
+	ctx := context.Background()
+	plan := testDomainModel(t, "example.com")
+	plan.Nameservers = tftypes.ListUnknown(tftypes.StringType)
+	plan.TagsAll = tftypes.MapUnknown(tftypes.StringType)
+	plan.Status = tftypes.StringUnknown()
+	plan.ExpirationDate = tftypes.StringUnknown()
+	plan.CreationDate = tftypes.StringUnknown()
+	plan.RegistrationOperationID = tftypes.StringUnknown()
+	plan.HostedZoneID = tftypes.StringUnknown()
+
+	domainResource := &DomainRegistrationResource{
+		client: &MockRoute53DomainsClient{
+			RegisterDomainFunc: func(_ context.Context, _ *route53domains.RegisterDomainInput, _ ...func(*route53domains.Options)) (*route53domains.RegisterDomainOutput, error) {
+				return &route53domains.RegisterDomainOutput{OperationId: aws.String("op-123")}, nil
+			},
+			GetOperationDetailFunc: func(_ context.Context, _ *route53domains.GetOperationDetailInput, _ ...func(*route53domains.Options)) (*route53domains.GetOperationDetailOutput, error) {
+				return &route53domains.GetOperationDetailOutput{Status: types.OperationStatusSuccessful}, nil
+			},
+			GetDomainDetailFunc: func(context.Context, *route53domains.GetDomainDetailInput, ...func(*route53domains.Options)) (*route53domains.GetDomainDetailOutput, error) {
+				return &route53domains.GetDomainDetailOutput{DomainName: aws.String("example.com")}, nil
+			},
+		},
+		route53Client: &MockRoute53Client{
+			ListHostedZonesByNameFunc: func(context.Context, *route53.ListHostedZonesByNameInput, ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error) {
+				return &route53.ListHostedZonesByNameOutput{}, nil
+			},
+		},
+	}
+
+	schema := testDomainResourceSchema(t)
+	req := resourceCreateRequest(t, schema, plan)
+	resp := &resource.CreateResponse{State: tfsdk.State{Schema: schema}}
+
+	domainResource.Create(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Create returned error diagnostics: %v", resp.Diagnostics)
+	}
+
+	var got DomainRegistrationResourceModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("reading response state returned diagnostics: %v", resp.Diagnostics)
+	}
+
+	if !got.Nameservers.IsNull() {
+		t.Fatalf("nameservers should be null, got %#v", got.Nameservers)
+	}
+	if !got.Status.IsNull() {
+		t.Fatalf("status should be null, got %q", got.Status.ValueString())
+	}
+	if !got.ExpirationDate.IsNull() {
+		t.Fatalf("expiration_date should be null, got %q", got.ExpirationDate.ValueString())
+	}
+	if !got.CreationDate.IsNull() {
+		t.Fatalf("creation_date should be null, got %q", got.CreationDate.ValueString())
+	}
+	if !got.RegistrationOperationID.IsNull() {
+		t.Fatalf("registration_operation_id should be null, got %q", got.RegistrationOperationID.ValueString())
+	}
+	if !got.HostedZoneID.IsNull() {
+		t.Fatalf("hosted_zone_id should be null, got %q", got.HostedZoneID.ValueString())
+	}
+	tagsAll, diags := frameworkMapToStringMap(ctx, got.TagsAll)
+	if diags.HasError() {
+		t.Fatalf("reading tags_all returned diagnostics: %v", diags)
+	}
+	if len(tagsAll) != 0 {
+		t.Fatalf("tags_all = %#v, want empty", tagsAll)
+	}
+}
+
 func TestReadKeepsPendingRegistrationStateWhenDomainDetailFails(t *testing.T) {
 	ctx := context.Background()
 	state := testDomainModel(t, "example.com")

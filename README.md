@@ -223,7 +223,7 @@ Provider creates two clients via `providerData`:
 ### Read
 
 1. `GetDomainDetail` API call
-2. If error, removes resource from state (known issue - should distinguish 404)
+2. If the detail read fails while registration is still pending, preserve state for later reconciliation; recognized not-found errors remove state; other read failures return an error and keep state
 3. `ListTagsForDomain` to refresh managed `tags` and `tags_all` only when tags are configured or already tracked in state
 4. `ListHostedZonesByName` to refresh hosted zone ID
 
