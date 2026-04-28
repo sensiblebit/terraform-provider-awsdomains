@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"maps"
 	"sort"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -53,17 +54,13 @@ func stringMapToFrameworkMap(tags map[string]string) (tftypes.Map, diag.Diagnost
 
 func cloneTags(tags map[string]string) map[string]string {
 	cloned := make(map[string]string, len(tags))
-	for key, value := range tags {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, tags)
 	return cloned
 }
 
 func mergeTags(defaultTags, resourceTags map[string]string) map[string]string {
 	merged := cloneTags(defaultTags)
-	for key, value := range resourceTags {
-		merged[key] = value
-	}
+	maps.Copy(merged, resourceTags)
 	return merged
 }
 

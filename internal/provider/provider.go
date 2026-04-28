@@ -28,6 +28,7 @@ type AWSDomainsProviderModel struct {
 	DefaultTags *DefaultTagsModel `tfsdk:"default_tags"`
 }
 
+// DefaultTagsModel stores provider default tags configuration.
 type DefaultTagsModel struct {
 	Tags types.Map `tfsdk:"tags"`
 }
