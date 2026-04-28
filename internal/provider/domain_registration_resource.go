@@ -335,6 +335,36 @@ func contactModelToAWS(m *ContactModel) *types.ContactDetail {
 	return contact
 }
 
+func contactModelsEqual(a, b *ContactModel) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	return a.FirstName.Equal(b.FirstName) &&
+		a.LastName.Equal(b.LastName) &&
+		a.Email.Equal(b.Email) &&
+		a.PhoneNumber.Equal(b.PhoneNumber) &&
+		a.AddressLine1.Equal(b.AddressLine1) &&
+		a.AddressLine2.Equal(b.AddressLine2) &&
+		a.City.Equal(b.City) &&
+		a.State.Equal(b.State) &&
+		a.ZipCode.Equal(b.ZipCode) &&
+		a.CountryCode.Equal(b.CountryCode) &&
+		a.ContactType.Equal(b.ContactType)
+}
+
+func domainContactsEqual(a, b DomainRegistrationResourceModel) bool {
+	return contactModelsEqual(a.AdminContact, b.AdminContact) &&
+		contactModelsEqual(a.RegistrantContact, b.RegistrantContact) &&
+		contactModelsEqual(a.TechContact, b.TechContact)
+}
+
+func domainPrivacySettingsEqual(a, b DomainRegistrationResourceModel) bool {
+	return a.AdminPrivacy.Equal(b.AdminPrivacy) &&
+		a.RegistrantPrivacy.Equal(b.RegistrantPrivacy) &&
+		a.TechPrivacy.Equal(b.TechPrivacy)
+}
+
 func frameworkListToAWSNameservers(ctx context.Context, value tftypes.List) ([]types.Nameserver, diag.Diagnostics) {
 	var nameserverNames []string
 	if value.IsNull() || value.IsUnknown() {
@@ -911,7 +941,7 @@ func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.Up
 	}
 
 	// Update auto-renew if changed
-	if data.AutoRenew.ValueBool() != state.AutoRenew.ValueBool() {
+	if !data.AutoRenew.Equal(state.AutoRenew) {
 		if data.AutoRenew.ValueBool() {
 			_, err := r.client.EnableDomainAutoRenew(ctx, &route53domains.EnableDomainAutoRenewInput{
 				DomainName: aws.String(domainName),
@@ -937,53 +967,57 @@ func (r *DomainRegistrationResource) Update(ctx context.Context, req resource.Up
 		}
 	}
 
-	nameservers, diags := frameworkListToAWSNameservers(ctx, data.Nameservers)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
+	if !data.Nameservers.Equal(state.Nameservers) {
+		nameservers, diags := frameworkListToAWSNameservers(ctx, data.Nameservers)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		if len(nameservers) > 0 {
+			_, err := r.client.UpdateDomainNameservers(ctx, &route53domains.UpdateDomainNameserversInput{
+				DomainName:  aws.String(domainName),
+				Nameservers: nameservers,
+			})
+			if err != nil {
+				resp.Diagnostics.AddError(
+					"Error updating nameservers",
+					fmt.Sprintf("Could not update nameservers for %s: %s", domainName, err.Error()),
+				)
+				return
+			}
+		}
 	}
-	if len(nameservers) > 0 {
-		_, err := r.client.UpdateDomainNameservers(ctx, &route53domains.UpdateDomainNameserversInput{
-			DomainName:  aws.String(domainName),
-			Nameservers: nameservers,
+
+	if !domainContactsEqual(data, state) {
+		_, err = r.client.UpdateDomainContact(ctx, &route53domains.UpdateDomainContactInput{
+			DomainName:        aws.String(domainName),
+			AdminContact:      contactModelToAWS(data.AdminContact),
+			RegistrantContact: contactModelToAWS(data.RegistrantContact),
+			TechContact:       contactModelToAWS(data.TechContact),
 		})
 		if err != nil {
 			resp.Diagnostics.AddError(
-				"Error updating nameservers",
-				fmt.Sprintf("Could not update nameservers for %s: %s", domainName, err.Error()),
+				"Error updating contacts",
+				fmt.Sprintf("Could not update contacts for %s: %s", domainName, err.Error()),
 			)
 			return
 		}
 	}
 
-	// Update contacts if changed
-	_, err = r.client.UpdateDomainContact(ctx, &route53domains.UpdateDomainContactInput{
-		DomainName:        aws.String(domainName),
-		AdminContact:      contactModelToAWS(data.AdminContact),
-		RegistrantContact: contactModelToAWS(data.RegistrantContact),
-		TechContact:       contactModelToAWS(data.TechContact),
-	})
-	if err != nil {
-		resp.Diagnostics.AddError(
-			"Error updating contacts",
-			fmt.Sprintf("Could not update contacts for %s: %s", domainName, err.Error()),
-		)
-		return
-	}
-
-	// Update privacy settings
-	_, err = r.client.UpdateDomainContactPrivacy(ctx, &route53domains.UpdateDomainContactPrivacyInput{
-		DomainName:        aws.String(domainName),
-		AdminPrivacy:      aws.Bool(data.AdminPrivacy.ValueBool()),
-		RegistrantPrivacy: aws.Bool(data.RegistrantPrivacy.ValueBool()),
-		TechPrivacy:       aws.Bool(data.TechPrivacy.ValueBool()),
-	})
-	if err != nil {
-		resp.Diagnostics.AddError(
-			"Error updating privacy settings",
-			fmt.Sprintf("Could not update privacy settings for %s: %s", domainName, err.Error()),
-		)
-		return
+	if !domainPrivacySettingsEqual(data, state) {
+		_, err = r.client.UpdateDomainContactPrivacy(ctx, &route53domains.UpdateDomainContactPrivacyInput{
+			DomainName:        aws.String(domainName),
+			AdminPrivacy:      aws.Bool(data.AdminPrivacy.ValueBool()),
+			RegistrantPrivacy: aws.Bool(data.RegistrantPrivacy.ValueBool()),
+			TechPrivacy:       aws.Bool(data.TechPrivacy.ValueBool()),
+		})
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Error updating privacy settings",
+				fmt.Sprintf("Could not update privacy settings for %s: %s", domainName, err.Error()),
+			)
+			return
+		}
 	}
 
 	// Refresh state

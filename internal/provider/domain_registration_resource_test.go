@@ -250,6 +250,90 @@ func TestFrameworkListToAWSNameserversAllowsUnknownList(t *testing.T) {
 	}
 }
 
+func TestDomainMutableSettingsUnchangedForTagOnlyUpdate(t *testing.T) {
+	nameservers := stringListValue(t, "ns1.example.com", "ns2.example.com")
+	state := DomainRegistrationResourceModel{
+		AdminContact:      testContactModel("admin@example.com"),
+		RegistrantContact: testContactModel("registrant@example.com"),
+		TechContact:       testContactModel("tech@example.com"),
+		AdminPrivacy:      tftypes.BoolValue(true),
+		RegistrantPrivacy: tftypes.BoolValue(true),
+		TechPrivacy:       tftypes.BoolValue(true),
+		Nameservers:       nameservers,
+	}
+	plan := state
+
+	if !domainContactsEqual(plan, state) {
+		t.Fatal("domainContactsEqual returned false for tag-only update")
+	}
+	if !domainPrivacySettingsEqual(plan, state) {
+		t.Fatal("domainPrivacySettingsEqual returned false for tag-only update")
+	}
+	if !plan.Nameservers.Equal(state.Nameservers) {
+		t.Fatal("nameservers comparison returned false for tag-only update")
+	}
+}
+
+func TestDomainContactsEqualDetectsContactChange(t *testing.T) {
+	state := DomainRegistrationResourceModel{
+		AdminContact:      testContactModel("admin@example.com"),
+		RegistrantContact: testContactModel("registrant@example.com"),
+		TechContact:       testContactModel("tech@example.com"),
+	}
+	plan := DomainRegistrationResourceModel{
+		AdminContact:      testContactModel("new-admin@example.com"),
+		RegistrantContact: testContactModel("registrant@example.com"),
+		TechContact:       testContactModel("tech@example.com"),
+	}
+
+	if domainContactsEqual(plan, state) {
+		t.Fatal("domainContactsEqual returned true for changed contact")
+	}
+}
+
+func TestDomainPrivacySettingsEqualDetectsPrivacyChange(t *testing.T) {
+	state := DomainRegistrationResourceModel{
+		AdminPrivacy:      tftypes.BoolValue(true),
+		RegistrantPrivacy: tftypes.BoolValue(true),
+		TechPrivacy:       tftypes.BoolValue(true),
+	}
+	plan := DomainRegistrationResourceModel{
+		AdminPrivacy:      tftypes.BoolValue(true),
+		RegistrantPrivacy: tftypes.BoolValue(false),
+		TechPrivacy:       tftypes.BoolValue(true),
+	}
+
+	if domainPrivacySettingsEqual(plan, state) {
+		t.Fatal("domainPrivacySettingsEqual returned true for changed privacy setting")
+	}
+}
+
+func stringListValue(t *testing.T, values ...string) tftypes.List {
+	t.Helper()
+
+	list, diags := tftypes.ListValueFrom(context.Background(), tftypes.StringType, values)
+	if diags.HasError() {
+		t.Fatalf("creating string list returned diagnostics: %v", diags)
+	}
+	return list
+}
+
+func testContactModel(email string) *ContactModel {
+	return &ContactModel{
+		FirstName:    stringValue("John"),
+		LastName:     stringValue("Doe"),
+		Email:        stringValue(email),
+		PhoneNumber:  stringValue("+1.5551234567"),
+		AddressLine1: stringValue("123 Main St"),
+		AddressLine2: tftypes.StringNull(),
+		City:         stringValue("Seattle"),
+		State:        stringValue("WA"),
+		ZipCode:      stringValue("98101"),
+		CountryCode:  stringValue("US"),
+		ContactType:  stringValue("PERSON"),
+	}
+}
+
 // Helper to create terraform string values for testing
 func stringValue(s string) tftypes.String {
 	return tftypes.StringValue(s)
